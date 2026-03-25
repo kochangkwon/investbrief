@@ -6,7 +6,9 @@ import logging
 from datetime import date
 from typing import Any
 
-import yfinance as yf
+from datetime import timedelta
+
+import FinanceDataReader as fdr
 
 from app.collectors import dart_collector, news_collector
 from app.database import async_session
@@ -16,25 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 def _fetch_stock_data_sync(stock_code: str) -> dict[str, Any] | None:
-    """yfinance로 종가/RSI/이동평균/거래량 수집 — 동기 함수"""
-    ticker = f"{stock_code}.KS"
+    """FinanceDataReader로 종가/RSI/이동평균/거래량 수집 — 동기 함수"""
     try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="30d")
-        if len(hist) < 2:
-            ticker = f"{stock_code}.KQ"
-            t = yf.Ticker(ticker)
-            hist = t.history(period="30d")
-            if len(hist) < 2:
-                return None
+        start = (date.today() - timedelta(days=120)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(stock_code, start)
+        if len(df) < 2:
+            return None
 
-        close = float(hist["Close"].iloc[-1])
-        prev_close = float(hist["Close"].iloc[-2])
+        close = float(df["Close"].iloc[-1])
+        prev_close = float(df["Close"].iloc[-2])
         change = close - prev_close
         change_pct = (change / prev_close) * 100
 
         # RSI(14일) 계산
-        closes = hist["Close"]
+        closes = df["Close"]
         delta = closes.diff()
         gain = delta.where(delta > 0, 0.0)
         loss = (-delta).where(delta < 0, 0.0)
@@ -52,7 +49,7 @@ def _fetch_stock_data_sync(stock_code: str) -> dict[str, Any] | None:
             ma20_gap = None
 
         # 거래량 비율 (당일 / 5일 평균)
-        volumes = hist["Volume"]
+        volumes = df["Volume"]
         today_vol = float(volumes.iloc[-1])
         avg_vol_5 = float(volumes.iloc[-6:-1].mean()) if len(volumes) >= 6 else None
         if avg_vol_5 and avg_vol_5 > 0:

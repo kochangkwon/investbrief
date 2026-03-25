@@ -1,6 +1,7 @@
-"""국내 시장 요약 수집 (yfinance)"""
+"""국내 시장 요약 수집 (지수: yfinance, 개별종목: FinanceDataReader)"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -9,34 +10,25 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 DOMESTIC_TICKERS = {
-    "kospi": "^KS11",
-    "kosdaq": "^KQ11",
-}
-
-LABELS = {
-    "kospi": "코스피",
-    "kosdaq": "코스닥",
+    "kospi": ("^KS11", "코스피"),
+    "kosdaq": ("^KQ11", "코스닥"),
 }
 
 
-async def get_domestic_summary() -> dict[str, Any]:
-    """코스피/코스닥 종가, 등락률 수집 (일괄 다운로드)"""
+def _fetch_domestic_sync() -> dict[str, Any]:
+    """코스피/코스닥 종가, 등락률 수집 — 동기 함수 (yfinance 일괄 다운로드)"""
     result: dict[str, Any] = {}
 
-    symbols = list(DOMESTIC_TICKERS.values())
+    symbols = [t for t, _ in DOMESTIC_TICKERS.values()]
     try:
         df = yf.download(symbols, period="2d", group_by="ticker", progress=False, threads=True)
     except Exception:
-        logger.exception("yfinance 국내 시장 다운로드 실패")
+        logger.exception("yfinance 국내 지수 다운로드 실패")
         return result
 
-    for key, ticker in DOMESTIC_TICKERS.items():
+    for key, (ticker, label) in DOMESTIC_TICKERS.items():
         try:
-            if len(symbols) == 1:
-                hist = df
-            else:
-                hist = df[ticker]
-
+            hist = df[ticker] if len(symbols) > 1 else df
             close_series = hist["Close"].dropna()
             if len(close_series) < 1:
                 logger.warning("데이터 없음: %s", key)
@@ -52,7 +44,7 @@ async def get_domestic_summary() -> dict[str, Any]:
                 change_pct = 0.0
 
             result[key] = {
-                "label": LABELS[key],
+                "label": label,
                 "close": round(close, 2),
                 "change": round(change, 2),
                 "change_pct": round(change_pct, 2),
@@ -62,3 +54,8 @@ async def get_domestic_summary() -> dict[str, Any]:
 
     logger.info("국내 시장 수집 완료: %d/%d", len(result), len(DOMESTIC_TICKERS))
     return result
+
+
+async def get_domestic_summary() -> dict[str, Any]:
+    """코스피/코스닥 종가, 등락률 수집 (비동기 래퍼)"""
+    return await asyncio.to_thread(_fetch_domestic_sync)

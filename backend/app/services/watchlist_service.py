@@ -6,7 +6,9 @@ import logging
 from datetime import datetime
 from typing import Any
 
-import yfinance as yf
+from datetime import timedelta
+
+import FinanceDataReader as fdr
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,22 +54,16 @@ async def list_all(session: AsyncSession) -> list[Watchlist]:
 
 
 def _get_stock_price_sync(stock_code: str) -> dict[str, Any] | None:
-    """yfinance로 종목 가격 조회 (KRX) — 동기 함수"""
-    ticker = f"{stock_code}.KS"
+    """FinanceDataReader로 종목 가격 조회 — 동기 함수"""
     try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="2d")
-        if len(hist) < 1:
-            # 코스닥 시도
-            ticker = f"{stock_code}.KQ"
-            t = yf.Ticker(ticker)
-            hist = t.history(period="2d")
-            if len(hist) < 1:
-                return None
+        start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(stock_code, start)
+        if len(df) < 1:
+            return None
 
-        close = float(hist["Close"].iloc[-1])
-        if len(hist) >= 2:
-            prev_close = float(hist["Close"].iloc[-2])
+        close = float(df["Close"].iloc[-1])
+        if len(df) >= 2:
+            prev_close = float(df["Close"].iloc[-2])
             change = close - prev_close
             change_pct = (change / prev_close) * 100
         else:
@@ -85,7 +81,7 @@ def _get_stock_price_sync(stock_code: str) -> dict[str, Any] | None:
 
 
 async def _get_stock_price(stock_code: str) -> dict[str, Any] | None:
-    """yfinance 동기 호출을 스레드풀로 실행"""
+    """FDR 동기 호출을 스레드풀로 실행"""
     return await asyncio.to_thread(_get_stock_price_sync, stock_code)
 
 
