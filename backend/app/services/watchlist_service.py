@@ -1,6 +1,7 @@
 """관심종목 관리"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -50,8 +51,8 @@ async def list_all(session: AsyncSession) -> list[Watchlist]:
     return list(result.scalars().all())
 
 
-def _get_stock_price(stock_code: str) -> dict[str, Any] | None:
-    """yfinance로 종목 가격 조회 (KRX)"""
+def _get_stock_price_sync(stock_code: str) -> dict[str, Any] | None:
+    """yfinance로 종목 가격 조회 (KRX) — 동기 함수"""
     ticker = f"{stock_code}.KS"
     try:
         t = yf.Ticker(ticker)
@@ -83,6 +84,11 @@ def _get_stock_price(stock_code: str) -> dict[str, Any] | None:
         return None
 
 
+async def _get_stock_price(stock_code: str) -> dict[str, Any] | None:
+    """yfinance 동기 호출을 스레드풀로 실행"""
+    return await asyncio.to_thread(_get_stock_price_sync, stock_code)
+
+
 async def check_watchlist(session: AsyncSession) -> list[dict[str, Any]]:
     """관심종목별 오늘의 변동사항 체크"""
     items = await list_all(session)
@@ -100,7 +106,7 @@ async def check_watchlist(session: AsyncSession) -> list[dict[str, Any]]:
         }
 
         # 1. 주가 등락
-        price = _get_stock_price(w.stock_code)
+        price = await _get_stock_price(w.stock_code)
         if price:
             check["price"] = price
         else:

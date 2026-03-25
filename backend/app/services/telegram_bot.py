@@ -10,7 +10,7 @@ import httpx
 
 from app.config import settings
 from app.database import async_session
-from app.services import brief_service, watchlist_service, telegram_service
+from app.services import brief_service, daily_report_service, watchlist_service, telegram_service
 from app.collectors import news_collector, dart_collector
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 /list — 관심종목 목록
 /news 키워드 — 종목/키워드 뉴스 검색
 /dart 종목명 — 종목 공시 검색
+/report — 관심종목 일일 리포트
 /help — 도움말"""
 
 
@@ -137,6 +138,14 @@ async def _handle_dart(args: str) -> str:
     return "\n".join(lines)
 
 
+async def _handle_report(_: str) -> str:
+    """관심종목 일일 리포트"""
+    msg = await daily_report_service.generate_daily_report()
+    if not msg:
+        return "관심종목이 없습니다.\n/watch 종목명 종목코드 로 추가하세요."
+    return msg
+
+
 async def _handle_help(_: str) -> str:
     return HELP_TEXT
 
@@ -148,6 +157,7 @@ COMMAND_HANDLERS = {
     "/list": lambda args: _handle_list(),
     "/news": _handle_news,
     "/dart": _handle_dart,
+    "/report": _handle_report,
     "/help": _handle_help,
     "/start": _handle_help,
 }

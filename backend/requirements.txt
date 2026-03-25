@@ -19,6 +19,3 @@ anthropic==0.52.0
 
 # Scheduler
 apscheduler==3.11.0
-
-# Telegram
-python-telegram-bot==22.5

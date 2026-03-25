@@ -11,7 +11,7 @@ from sqlalchemy import delete
 from app.config import settings
 from app.database import async_session
 from app.models.brief import DailyBrief
-from app.services import brief_service, telegram_service, watchlist_service
+from app.services import brief_service, daily_report_service, telegram_service, watchlist_service
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,15 @@ async def _midday_watchlist_check():
         logger.exception("스케줄: 점심 체크 실패")
 
 
+async def _daily_report():
+    """16:30 장 마감 후 관심종목 일일 리포트"""
+    logger.info("스케줄: 일일 리포트 시작")
+    try:
+        await daily_report_service.send_daily_report()
+    except Exception:
+        logger.exception("스케줄: 일일 리포트 실패")
+
+
 async def _cleanup_old_data():
     """90일 이전 데이터 삭제"""
     try:
@@ -103,11 +112,15 @@ def start_scheduler():
 
     scheduler.add_job(_generate_and_send, "cron", hour=hour, minute=0, id="morning_brief")
     scheduler.add_job(_midday_watchlist_check, "cron", hour=12, minute=0, id="midday_check")
+    scheduler.add_job(
+        _daily_report, "cron", hour=16, minute=30,
+        id="daily_report", day_of_week="mon-fri",
+    )
     scheduler.add_job(_cleanup_old_data, "cron", hour=18, minute=0, id="cleanup")
 
     scheduler.start()
     logger.info(
-        "스케줄러 시작: %02d:00 브리프 | 12:00 점심체크 | 18:00 정리", hour
+        "스케줄러 시작: %02d:00 브리프 | 12:00 점심체크 | 16:30 일일리포트 | 18:00 정리", hour
     )
 
 
