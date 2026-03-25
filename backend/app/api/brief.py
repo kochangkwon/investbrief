@@ -1,0 +1,43 @@
+"""브리프 API 라우터"""
+
+from datetime import date
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_session
+from app.services import brief_service, telegram_service
+
+router = APIRouter(prefix="/api/brief", tags=["brief"])
+
+
+@router.get("/today")
+async def get_today_brief(session: AsyncSession = Depends(get_session)):
+    brief = await brief_service.get_brief_by_date(session, date.today())
+    if not brief:
+        raise HTTPException(status_code=404, detail="오늘의 브리프가 아직 생성되지 않았습니다")
+    return brief
+
+
+@router.get("/list")
+async def list_briefs(days: int = 7, session: AsyncSession = Depends(get_session)):
+    return await brief_service.get_recent_briefs(session, days)
+
+
+@router.get("/{brief_date}")
+async def get_brief(brief_date: date, session: AsyncSession = Depends(get_session)):
+    brief = await brief_service.get_brief_by_date(session, brief_date)
+    if not brief:
+        raise HTTPException(status_code=404, detail="해당 날짜의 브리프가 없습니다")
+    return brief
+
+
+@router.post("/generate")
+async def generate_brief(session: AsyncSession = Depends(get_session)):
+    """수동 브리프 생성 (테스트용)"""
+    existing = await brief_service.get_brief_by_date(session, date.today())
+    if existing:
+        raise HTTPException(status_code=409, detail="오늘의 브리프가 이미 존재합니다")
+    brief = await brief_service.generate_daily_brief(session)
+    await telegram_service.send_brief(brief)
+    return brief
