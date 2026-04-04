@@ -110,7 +110,7 @@ def start_scheduler():
     """스케줄러 시작"""
     hour = settings.brief_send_hour
 
-    scheduler.add_job(_generate_and_send, "cron", hour=hour, minute=0, id="morning_brief")
+    scheduler.add_job(_generate_and_send, "cron", hour=hour, minute=settings.brief_send_minute, id="morning_brief")
     scheduler.add_job(_midday_watchlist_check, "cron", hour=12, minute=0, id="midday_check")
     scheduler.add_job(
         _daily_report, "cron", hour=16, minute=30,

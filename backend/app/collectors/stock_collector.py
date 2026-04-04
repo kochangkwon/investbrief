@@ -1,61 +1,50 @@
-"""국내 시장 요약 수집 (지수: yfinance, 개별종목: FinanceDataReader)"""
+"""국내 시장 요약 수집 (네이버 금융 API)"""
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
-import yfinance as yf
+import httpx
 
 logger = logging.getLogger(__name__)
 
-DOMESTIC_TICKERS = {
-    "kospi": ("^KS11", "코스피"),
-    "kosdaq": ("^KQ11", "코스닥"),
+NAVER_INDEX_API = "https://m.stock.naver.com/api/index/{symbol}/basic"
+
+DOMESTIC_INDICES = {
+    "kospi": ("KOSPI", "코스피"),
+    "kosdaq": ("KOSDAQ", "코스닥"),
 }
 
 
-def _fetch_domestic_sync() -> dict[str, Any]:
-    """코스피/코스닥 종가, 등락률 수집 — 동기 함수 (yfinance 일괄 다운로드)"""
+async def get_domestic_summary() -> dict[str, Any]:
+    """코스피/코스닥 종가, 등락률 수집 (네이버 금융 API)"""
     result: dict[str, Any] = {}
 
-    symbols = [t for t, _ in DOMESTIC_TICKERS.values()]
-    try:
-        df = yf.download(symbols, period="2d", group_by="ticker", progress=False, threads=True)
-    except Exception:
-        logger.exception("yfinance 국내 지수 다운로드 실패")
-        return result
+    async with httpx.AsyncClient(timeout=10) as client:
+        for key, (symbol, label) in DOMESTIC_INDICES.items():
+            try:
+                resp = await client.get(NAVER_INDEX_API.format(symbol=symbol))
+                resp.raise_for_status()
+                data = resp.json()
 
-    for key, (ticker, label) in DOMESTIC_TICKERS.items():
-        try:
-            hist = df[ticker] if len(symbols) > 1 else df
-            close_series = hist["Close"].dropna()
-            if len(close_series) < 1:
-                logger.warning("데이터 없음: %s", key)
-                continue
+                close = float(data["closePrice"].replace(",", ""))
+                change = float(data["compareToPreviousClosePrice"].replace(",", ""))
+                change_pct = float(data["fluctuationsRatio"])
 
-            close = float(close_series.iloc[-1])
-            if len(close_series) >= 2:
-                prev_close = float(close_series.iloc[-2])
-                change = close - prev_close
-                change_pct = (change / prev_close) * 100
-            else:
-                change = 0.0
-                change_pct = 0.0
+                # 하락인 경우 부호 처리
+                direction = data.get("compareToPreviousPrice", {}).get("code", "")
+                if direction == "5":  # FALLING
+                    change = -abs(change)
+                    change_pct = -abs(change_pct)
 
-            result[key] = {
-                "label": label,
-                "close": round(close, 2),
-                "change": round(change, 2),
-                "change_pct": round(change_pct, 2),
-            }
-        except Exception:
-            logger.exception("국내 시장 데이터 파싱 실패: %s", key)
+                result[key] = {
+                    "label": label,
+                    "close": round(close, 2),
+                    "change": round(change, 2),
+                    "change_pct": round(change_pct, 2),
+                }
+            except Exception:
+                logger.exception("국내 시장 데이터 수집 실패: %s", key)
 
-    logger.info("국내 시장 수집 완료: %d/%d", len(result), len(DOMESTIC_TICKERS))
+    logger.info("국내 시장 수집 완료: %d/%d", len(result), len(DOMESTIC_INDICES))
     return result
-
-
-async def get_domestic_summary() -> dict[str, Any]:
-    """코스피/코스닥 종가, 등락률 수집 (비동기 래퍼)"""
-    return await asyncio.to_thread(_fetch_domestic_sync)

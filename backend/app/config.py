@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # Brief
     brief_send_hour: int = 7
+    brief_send_minute: int = 30
     ai_model: str = "claude-sonnet-4-20250514"
     ai_max_tokens: int = 1000
 

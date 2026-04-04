@@ -1,8 +1,11 @@
 """브리프 API 라우터"""
 
+import logging
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
+
+logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
@@ -34,10 +37,12 @@ async def get_brief(brief_date: date, session: AsyncSession = Depends(get_sessio
 
 @router.post("/generate")
 async def generate_brief(session: AsyncSession = Depends(get_session)):
-    """수동 브리프 생성 (테스트용)"""
+    """수동 브리프 생성 — 기존 브리프가 있으면 삭제 후 재생성"""
     existing = await brief_service.get_brief_by_date(session, date.today())
     if existing:
-        raise HTTPException(status_code=409, detail="오늘의 브리프가 이미 존재합니다")
+        await session.delete(existing)
+        await session.commit()
+        logger.info("기존 브리프 삭제 (id=%s, date=%s)", existing.id, existing.date)
     brief = await brief_service.generate_daily_brief(session)
     await telegram_service.send_brief(brief)
     return brief
