@@ -70,7 +70,7 @@ def format_brief(brief: Any) -> str:
         parts.append("")
 
     # AI 뉴스 요약
-    parts.append("<b>📰 AI 뉴스 요약</b>")
+    parts.append("<b>📰 AI 뉴스 브리핑</b>")
     parts.append(brief.news_summary)
     parts.append("")
 
