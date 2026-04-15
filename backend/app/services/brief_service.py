@@ -1,6 +1,7 @@
 """브리프 생성 오케스트레이터"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any
@@ -29,10 +30,12 @@ async def generate_daily_brief(session: AsyncSession) -> DailyBrief:
 
     # 1. 데이터 수집 (개별 실패 허용)
     logger.info("브리프 생성 시작")
-    global_market = await _safe_collect("global_market", market_collector.get_global_summary(), {})
-    domestic_market = await _safe_collect("domestic_market", stock_collector.get_domestic_summary(), {})
-    news_items = await _safe_collect("news", news_collector.get_today_news(limit=20), [])
-    dart_items = await _safe_collect("dart", dart_collector.get_today_disclosures(), [])
+    global_market, domestic_market, news_items, dart_items = await asyncio.gather(
+        _safe_collect("global_market", market_collector.get_global_summary(), {}),
+        _safe_collect("domestic_market", stock_collector.get_domestic_summary(), {}),
+        _safe_collect("news", news_collector.get_today_news(limit=20), []),
+        _safe_collect("dart", dart_collector.get_today_disclosures(), []),
+    )
 
     # 2. AI 요약
     news_summary = await _safe_collect(

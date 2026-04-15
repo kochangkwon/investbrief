@@ -29,9 +29,14 @@ async def summarize_news(news_items: list[dict[str, Any]]) -> str:
         logger.warning("Anthropic API 키 미설정")
         return "AI 요약 불가 (API 키 미설정)"
 
-    titles = "\n".join(
-        f"- {n['title']} ({n.get('source', '')})" for n in news_items[:20]
-    )
+    lines = []
+    for n in news_items[:15]:
+        line = f"- {n['title']} ({n.get('source', '')})"
+        desc = n.get("description", "")
+        if desc:
+            line += f"\n  요약: {desc}"
+        lines.append(line)
+    titles = "\n".join(lines)
 
     prompt = (
         "아래는 오늘의 경제/증시 뉴스 제목입니다.\n\n"

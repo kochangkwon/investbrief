@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -18,19 +18,34 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
 
+def _is_weekday() -> bool:
+    """평일 여부 (토/일 제외)"""
+    return date.today().weekday() < 5
+
+
 async def _generate_and_send():
     """매일 아침 브리프 생성 + 텔레그램 발송"""
+    if not _is_weekday():
+        logger.info("스케줄: 주말 — 모닝브리프 스킵")
+        return
     logger.info("스케줄: 모닝브리프 생성 시작")
     try:
         async with async_session() as session:
             existing = await brief_service.get_brief_by_date(session, date.today())
             if existing:
-                logger.info("스케줄: 오늘 브리프 이미 존재, 발송만 진행")
+                if existing.sent_at:
+                    logger.info("스케줄: 오늘 브리프 이미 발송됨, 스킵")
+                    return
+                logger.info("스케줄: 오늘 브리프 존재, 미발송 → 발송 진행")
                 await telegram_service.send_brief(existing)
+                existing.sent_at = datetime.now()
+                await session.commit()
                 return
 
             brief = await brief_service.generate_daily_brief(session)
             await telegram_service.send_brief(brief)
+            brief.sent_at = datetime.now()
+            await session.commit()
         logger.info("스케줄: 모닝브리프 완료")
     except Exception:
         logger.exception("스케줄: 모닝브리프 생성 실패")
@@ -39,6 +54,9 @@ async def _generate_and_send():
 
 async def _midday_watchlist_check():
     """12:00 점심 — 관심종목 변동 알림"""
+    if not _is_weekday():
+        logger.info("스케줄: 주말 — 점심 체크 스킵")
+        return
     logger.info("스케줄: 점심 관심종목 체크 시작")
     try:
         async with async_session() as session:
@@ -80,6 +98,7 @@ async def _midday_watchlist_check():
 
     except Exception:
         logger.exception("스케줄: 점심 체크 실패")
+        await telegram_service.send_text("⚠️ 점심 관심종목 체크 중 오류가 발생했습니다.")
 
 
 async def _daily_report():
@@ -89,6 +108,7 @@ async def _daily_report():
         await daily_report_service.send_daily_report()
     except Exception:
         logger.exception("스케줄: 일일 리포트 실패")
+        await telegram_service.send_text("⚠️ 일일 리포트 생성 중 오류가 발생했습니다.")
 
 
 async def _cleanup_old_data():

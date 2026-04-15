@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from datetime import date
 from typing import Any
@@ -89,7 +90,7 @@ async def generate_daily_report() -> str | None:
     lines = [f"📊 <b>관심종목 일일 리포트</b> ({today_str})", ""]
 
     for w in items:
-        lines.append(f"<b>{w.stock_name}</b> ({w.stock_code})")
+        lines.append(f"<b>{html.escape(w.stock_name)}</b> ({w.stock_code})")
 
         # 주가 데이터
         data = await _fetch_stock_data(w.stock_code)
@@ -113,16 +114,30 @@ async def generate_daily_report() -> str | None:
         # 뉴스
         try:
             news = await news_collector._fetch_naver_news(w.stock_name)
-            news_titles = [n["title"] for n in news[:2]]
+            filtered = [n for n in news if w.stock_name in n["title"]]
+            if not filtered:
+                filtered = [n for n in news if w.stock_code in n["title"]]
+            news_items = filtered[:2]
         except Exception:
-            news_titles = []
+            news_items = []
 
-        # 공시
-        matched_disc = [d for d in all_disclosures if d.get("stock_code") == w.stock_code]
+        # 공시 (stock_code 또는 corp_name 매칭)
+        matched_disc = [
+            d for d in all_disclosures
+            if d.get("stock_code") == w.stock_code
+            or (w.stock_name and w.stock_name in d.get("corp_name", ""))
+        ]
 
-        news_str = f"{len(news_titles)}건" if news_titles else "없음"
+        news_str = f"{len(news_items)}건" if news_items else "없음"
         disc_str = f"{len(matched_disc)}건" if matched_disc else "없음"
         lines.append(f"  뉴스: {news_str} | 공시: {disc_str}")
+        for n in news_items:
+            link = n.get("link", "")
+            title = n.get("title", "")
+            if link:
+                lines.append(f'    • <a href="{link}">{title}</a>')
+            else:
+                lines.append(f"    • {title}")
 
         lines.append("")
 

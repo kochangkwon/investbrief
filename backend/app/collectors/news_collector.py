@@ -1,6 +1,7 @@
 """경제 뉴스 수집 (RSS + 네이버 뉴스 API)"""
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -52,15 +53,17 @@ async def _fetch_naver_news(keyword: str) -> list[dict[str, Any]]:
             "X-Naver-Client-Id": settings.naver_client_id,
             "X-Naver-Client-Secret": settings.naver_client_secret,
         }
-        params = {"query": keyword, "display": 5, "sort": "date"}
+        params = {"query": f'"{keyword}"', "display": 10, "sort": "date"}
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(NAVER_SEARCH_URL, headers=headers, params=params)
             resp.raise_for_status()
         data = resp.json()
         for item in data.get("items", []):
             title = item["title"].replace("<b>", "").replace("</b>", "")
+            desc = re.sub(r"<[^>]+>", "", item.get("description", ""))
             items.append({
                 "title": title,
+                "description": desc[:200],
                 "link": item["originallink"],
                 "source": "네이버",
                 "published": item.get("pubDate", ""),

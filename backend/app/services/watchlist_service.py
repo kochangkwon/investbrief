@@ -94,6 +94,15 @@ async def check_watchlist(session: AsyncSession) -> list[dict[str, Any]]:
     # DART 공시 한 번만 조회
     all_disclosures = await dart_collector.get_today_disclosures()
 
+    # 시세 일괄 병렬 조회
+    price_results = await asyncio.gather(
+        *[_get_stock_price(w.stock_code) for w in items],
+        return_exceptions=True,
+    )
+    price_map: dict[str, dict[str, Any] | None] = {}
+    for w, result in zip(items, price_results):
+        price_map[w.stock_code] = result if not isinstance(result, Exception) else None
+
     results: list[dict[str, Any]] = []
     for w in items:
         check: dict[str, Any] = {
@@ -101,22 +110,29 @@ async def check_watchlist(session: AsyncSession) -> list[dict[str, Any]]:
             "stock_name": w.stock_name,
         }
 
-        # 1. 주가 등락
-        price = await _get_stock_price(w.stock_code)
-        if price:
-            check["price"] = price
-        else:
-            check["price"] = None
+        # 1. 주가 등락 (일괄 조회 결과 사용)
+        price = price_map.get(w.stock_code)
+        check["price"] = price if price else None
 
         # 2. 뉴스 (네이버 검색 — 상위 2건)
         try:
             news = await news_collector._fetch_naver_news(w.stock_name)
-            check["news"] = [n["title"] for n in news[:2]]
+            filtered = [n for n in news if w.stock_name in n["title"]]
+            if not filtered:
+                filtered = [n for n in news if w.stock_code in n["title"]]
+            check["news"] = [
+                {"title": n["title"], "link": n.get("link", "")}
+                for n in filtered[:2]
+            ]
         except Exception:
             check["news"] = []
 
-        # 3. DART 공시
-        matched = [d for d in all_disclosures if d.get("stock_code") == w.stock_code]
+        # 3. DART 공시 (stock_code 또는 corp_name 매칭)
+        matched = [
+            d for d in all_disclosures
+            if d.get("stock_code") == w.stock_code
+            or (w.stock_name and w.stock_name in d.get("corp_name", ""))
+        ]
         check["disclosures"] = [
             {"title": d["title"], "importance": d["importance"]}
             for d in matched[:5]

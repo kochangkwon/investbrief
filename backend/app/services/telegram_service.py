@@ -1,6 +1,7 @@
 """텔레그램 봇 — 브리프 발송 + 명령어 처리"""
 from __future__ import annotations
 
+import html
 import logging
 from typing import Any
 
@@ -41,11 +42,11 @@ def _format_market(data: dict[str, Any], title: str) -> str:
     """시장 데이터를 텔레그램 포맷으로"""
     if not data:
         return ""
-    lines = [f"<b>{title}</b>"]
+    lines = [f"<b>{html.escape(title)}</b>"]
     for v in data.values():
         sign = "+" if v["change_pct"] > 0 else ""
         emoji = "🔴" if v["change_pct"] > 0 else "🔵" if v["change_pct"] < 0 else "⚪"
-        lines.append(f"  {emoji} {v['label']}: {v['close']:,.2f} ({sign}{v['change_pct']:.2f}%)")
+        lines.append(f"  {emoji} {html.escape(v['label'])}: {v['close']:,.2f} ({sign}{v['change_pct']:.2f}%)")
     return "\n".join(lines)
 
 
@@ -71,7 +72,7 @@ def format_brief(brief: Any) -> str:
 
     # AI 뉴스 요약
     parts.append("<b>📰 AI 뉴스 브리핑</b>")
-    parts.append(brief.news_summary)
+    parts.append(html.escape(brief.news_summary))
     parts.append("")
 
     # DART 공시 (중요한 것만)
@@ -80,7 +81,7 @@ def format_brief(brief: Any) -> str:
     if important:
         parts.append(f"<b>📋 주요 공시</b> ({len(important)}건)")
         for d in important[:10]:
-            parts.append(f"  {d['importance']} {d['corp_name']}: {d['title']}")
+            parts.append(f"  {d['importance']} {html.escape(d['corp_name'])}: {html.escape(d['title'])}")
         parts.append("")
 
     # 관심종목
@@ -88,7 +89,7 @@ def format_brief(brief: Any) -> str:
     if watchlist:
         parts.append("<b>🔍 관심종목 체크</b>")
         for w in watchlist:
-            parts.append(f"  • {w.get('stock_name', '')}: {w.get('summary', '')}")
+            parts.append(f"  • {html.escape(w.get('stock_name', ''))}: {html.escape(w.get('summary', ''))}")
 
     return "\n".join(parts)
 

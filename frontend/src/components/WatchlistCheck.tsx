@@ -6,7 +6,7 @@ interface WatchlistItem {
   stock_code: string;
   stock_name: string;
   price: { close: number; change: number; change_pct: number } | null;
-  news: string[];
+  news: ({ title: string; link?: string } | string)[];
   disclosures: { title: string; importance: string }[];
   summary: string;
 }
@@ -67,11 +67,27 @@ function StockCard({ item }: { item: WatchlistItem }) {
             <div>
               <div className="text-[11px] font-semibold text-gray-400 mb-1.5">📰 뉴스</div>
               <ul className="space-y-1">
-                {item.news.map((title, i) => (
-                  <li key={i} className="text-sm text-gray-700 leading-relaxed">
-                    • {title}
-                  </li>
-                ))}
+                {item.news.map((n, i) => {
+                  const title = typeof n === "string" ? n : n.title;
+                  const link = typeof n === "string" ? "" : n.link || "";
+                  return (
+                    <li key={i} className="text-sm text-gray-700 leading-relaxed">
+                      •{" "}
+                      {link ? (
+                        <a
+                          href={link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-gray-700 hover:text-blue-600 hover:underline"
+                        >
+                          {title}
+                        </a>
+                      ) : (
+                        title
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}

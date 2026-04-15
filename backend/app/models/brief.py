@@ -1,4 +1,5 @@
 import datetime
+from typing import Optional
 
 from sqlalchemy import JSON, Date, DateTime, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -19,4 +20,7 @@ class DailyBrief(Base):
     watchlist_check: Mapped[list] = mapped_column(JSON)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=datetime.datetime.now
+    )
+    sent_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime, nullable=True, default=None
     )

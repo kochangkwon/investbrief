@@ -11,7 +11,7 @@ import httpx
 from app.config import settings
 from app.database import async_session
 from app.services import brief_service, daily_report_service, watchlist_service, telegram_service
-from app.collectors import news_collector, dart_collector
+from app.collectors import news_collector, dart_collector, stock_search
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +56,19 @@ async def _handle_today() -> str:
 async def _handle_watch(args: str) -> str:
     """관심종목 추가"""
     if not args.strip():
-        return "사용법: /watch 종목명 종목코드\n예) /watch 삼성전자 005930"
+        return "사용법: /watch 종목명\n예) /watch 삼성전자"
 
     parts = args.strip().split()
-    if len(parts) == 1:
-        # 종목명만 입력 — 코드를 종목명으로 대체 (수동 입력 유도)
-        return f"종목코드도 함께 입력해주세요.\n예) /watch {parts[0]} 005930"
-
     stock_name = parts[0]
-    stock_code = parts[1]
+    stock_code = parts[1] if len(parts) > 1 else None
+
+    # 종목코드 미입력 시 자동 검색
+    if not stock_code:
+        results = await stock_search.search_stocks(stock_name, limit=1)
+        if not results:
+            return f"⚠️ '{stock_name}' 종목을 찾을 수 없습니다.\n종목코드를 직접 입력해주세요.\n예) /watch {stock_name} 005930"
+        stock_code = results[0]["stock_code"]
+        stock_name = results[0]["stock_name"]
 
     if not stock_code.isdigit() or len(stock_code) != 6:
         return f"종목코드는 6자리 숫자입니다.\n예) /watch {stock_name} 005930"
