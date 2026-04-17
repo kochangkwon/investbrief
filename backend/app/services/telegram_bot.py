@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import date
 from typing import Any
 
@@ -10,7 +11,7 @@ import httpx
 
 from app.config import settings
 from app.database import async_session
-from app.services import brief_service, daily_report_service, watchlist_service, telegram_service
+from app.services import brief_service, daily_report_service, theme_discovery_service, theme_radar_service, watchlist_service, telegram_service
 from app.collectors import news_collector, dart_collector, stock_search
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,21 @@ HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 /news 키워드 — 종목/키워드 뉴스 검색
 /dart 종목명 — 종목 공시 검색
 /report — 관심종목 일일 리포트
+
+<b>🎯 테마 선행 스캐너</b>
+/theme-add "테마명" 키워드1,키워드2 — 테마 추가
+/theme-remove "테마명" — 테마 삭제
+/theme-list — 테마 목록
+/theme-scan — 즉시 스캔 (수동)
+
+매주 월 08:00 자동 스캔 → 신규 수혜주 텔레그램 알림
+
+<b>🔍 아카이브 테마 발굴</b>
+/theme-discover [일수] — AI가 부상 테마 자동 발굴 (기본 30일)
+/theme-trending — 언급 빈도 TOP 10 종목
+
+매주 일요일 09:00 자동 발굴 리포트 전송
+
 /help — 도움말"""
 
 
@@ -150,6 +166,148 @@ async def _handle_report(_: str) -> str:
     return msg
 
 
+async def _handle_theme_add(args: str) -> str:
+    """
+    /theme-add "테마명" 키워드1,키워드2,키워드3
+    예: /theme-add "AI 데이터센터 전력" 북미인증,초고압케이블,345kV
+    """
+    if not args.strip():
+        return (
+            "사용법:\n"
+            '/theme-add "테마명" 키워드1,키워드2,키워드3\n\n'
+            "예시:\n"
+            '/theme-add "AI 데이터센터 전력" 북미인증,초고압케이블,345kV,KEMA'
+        )
+
+    match = re.match(r'^"([^"]+)"\s+(.+)$', args.strip())
+    if not match:
+        return '테마명은 큰따옴표로 감싸주세요: /theme-add "테마명" 키워드1,키워드2'
+
+    theme_name = match.group(1)
+    keywords = match.group(2).strip()
+
+    if not keywords:
+        return "키워드를 최소 1개 이상 입력해주세요."
+
+    async with async_session() as session:
+        success, message = await theme_radar_service.add_theme(session, theme_name, keywords)
+    return ("✅ " if success else "❌ ") + message
+
+
+async def _handle_theme_remove(args: str) -> str:
+    """/theme-remove "테마명" """
+    if not args.strip():
+        return '사용법: /theme-remove "테마명"'
+
+    match = re.match(r'^"([^"]+)"$', args.strip())
+    if not match:
+        return '테마명은 큰따옴표로 감싸주세요: /theme-remove "테마명"'
+
+    theme_name = match.group(1)
+    async with async_session() as session:
+        success, message = await theme_radar_service.remove_theme(session, theme_name)
+    return ("✅ " if success else "❌ ") + message
+
+
+async def _handle_theme_list() -> str:
+    """/theme-list — 등록된 테마 목록"""
+    async with async_session() as session:
+        themes = await theme_radar_service.list_themes(session)
+
+    if not themes:
+        return "등록된 테마가 없습니다.\n/theme-add 로 테마를 추가해보세요."
+
+    lines = [f"🎯 <b>등록된 테마 ({len(themes)}개)</b>", ""]
+    for i, t in enumerate(themes, 1):
+        status = "🟢" if t["enabled"] else "🔴"
+        lines.append(
+            f"{i}. {status} <b>{t['name']}</b>\n"
+            f"   키워드: {t['keywords']}\n"
+            f"   감지 종목: {t['detected_count']}개"
+        )
+
+    return "\n".join(lines)
+
+
+async def _handle_theme_scan() -> str:
+    """/theme-scan — 수동 즉시 스캔"""
+    await telegram_service.send_text("🔍 테마 스캔 시작... (시간이 걸릴 수 있습니다)")
+
+    results = await theme_radar_service.scan_all_themes()
+    total_new = sum(results.values())
+
+    if total_new == 0:
+        return "✅ 스캔 완료 — 새로운 수혜주 후보 없음"
+
+    lines = [f"✅ 스캔 완료 — 총 {total_new}종목 신규 감지", ""]
+    for theme_name, count in results.items():
+        if count > 0:
+            lines.append(f"• {theme_name}: {count}종목")
+
+    return "\n".join(lines)
+
+
+async def _handle_theme_discover(args: str) -> str:
+    """
+    /theme-discover [일수]
+    아카이브에서 부상 테마 자동 발굴. 기본 30일.
+    """
+    days = 30
+    if args.strip():
+        try:
+            days = int(args.strip())
+            if days < 7:
+                return "최소 7일 이상 분석 가능합니다."
+            if days > 180:
+                return "최대 180일까지 분석 가능합니다."
+        except ValueError:
+            return "사용법: /theme-discover [일수]\n예: /theme-discover 30"
+
+    await telegram_service.send_text(
+        f"🔍 최근 {days}일 아카이브 분석 중... (Claude API 호출, 30초~1분 소요)"
+    )
+
+    result = await theme_discovery_service.discover_themes(days=days)
+
+    if "error" in result:
+        return f"❌ {result['error']}"
+
+    def escape(text: str) -> str:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    message = (
+        f"🎯 <b>테마 발굴 결과 ({days}일)</b>\n"
+        f"뉴스 {result['news_count']}건 · 공시 {result['disclosure_count']}건 분석\n\n"
+        f"{escape(result['analysis'])}"
+    )
+
+    await theme_discovery_service._send_long_message(message)
+    return ""
+
+
+async def _handle_theme_trending() -> str:
+    """/theme-trending — 최근 30일 언급 빈도 TOP 10 종목"""
+    top_stocks = await theme_discovery_service.analyze_stock_frequency(days=30)
+
+    if not top_stocks:
+        return "최근 30일 아카이브가 없습니다."
+
+    def escape(text: str) -> str:
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    lines = ["📊 <b>언급 빈도 TOP 10 (최근 30일)</b>", ""]
+    for i, s in enumerate(top_stocks[:10], 1):
+        lines.append(
+            f"{i}. <b>{escape(s['stock_name'])}</b> ({s['stock_code']})\n"
+            f"   └ {s['mention_count']}회 언급 · {s['unique_days']}일 노출"
+        )
+
+    lines.append("")
+    lines.append("💡 /theme-discover 로 AI 테마 분석 가능")
+
+    return "\n".join(lines)
+
+
 async def _handle_help(_: str) -> str:
     return HELP_TEXT
 
@@ -162,6 +320,12 @@ COMMAND_HANDLERS = {
     "/news": _handle_news,
     "/dart": _handle_dart,
     "/report": _handle_report,
+    "/theme-add": _handle_theme_add,
+    "/theme-remove": _handle_theme_remove,
+    "/theme-list": lambda args: _handle_theme_list(),
+    "/theme-scan": lambda args: _handle_theme_scan(),
+    "/theme-discover": _handle_theme_discover,
+    "/theme-trending": lambda args: _handle_theme_trending(),
     "/help": _handle_help,
     "/start": _handle_help,
 }

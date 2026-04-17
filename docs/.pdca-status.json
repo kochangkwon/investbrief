@@ -1,18 +1,68 @@
 {
   "version": "2.0",
-  "lastUpdated": "2026-03-25T05:14:13.048Z",
-  "activeFeatures": [],
-  "primaryFeature": null,
-  "features": {},
+  "lastUpdated": "2026-04-16T13:57:00.000Z",
+  "activeFeatures": ["theme-accuracy-fix"],
+  "primaryFeature": "theme-accuracy-fix",
+  "features": {
+    "theme-accuracy-fix": {
+      "phase": "check",
+      "createdAt": "2026-04-16T13:57:00.000Z",
+      "lastUpdated": "2026-04-16T23:20:00.000Z",
+      "planPath": "docs/01-plan/features/theme-accuracy-fix.plan.md",
+      "designPath": "docs/02-design/features/theme-accuracy-fix.design.md",
+      "analysisPath": "docs/03-analysis/theme-accuracy-fix.analysis.md",
+      "cleanupReportPath": "docs/03-analysis/theme-cleanup-report.md",
+      "implementation": {
+        "theme_radar_service_modified": true,
+        "verify_theme_detections_created": true,
+        "gitignore_updated": true,
+        "spot_test_passed": "4/4 (셀트리온→NO, 현대로템→YES, 리노공업→YES, 삼천당제약→NO)",
+        "dryrun_result": "48건 검증 → 28 YES / 20 NO / 0 ERROR",
+        "apply_result": "19건 삭제 (티씨케이 Claude 변동성으로 1건 flip)",
+        "theme_redesign": "포장재·캔병 공급 대란 수혜 → 포장재 원료 공급 (옵션 A 키워드)"
+      },
+      "matchRate": 100,
+      "iteration": 0,
+      "decisions": {
+        "Q1": "A - Claude API 검증 레이어",
+        "Q2": "A - 기존 48건 재검증 후 Ko~님 승인 삭제",
+        "Q3": "B - reason 컬럼 미추가 (스키마 유지)"
+      }
+    }
+  },
   "pipeline": {
     "currentPhase": 1,
     "level": "Dynamic",
     "phaseHistory": []
   },
   "session": {
-    "startedAt": "2026-03-25T05:14:13.048Z",
-    "onboardingCompleted": false,
-    "lastActivity": "2026-03-25T05:14:13.048Z"
+    "startedAt": "2026-04-16T13:57:00.000Z",
+    "onboardingCompleted": true,
+    "lastActivity": "2026-04-16T13:57:00.000Z"
   },
-  "history": []
+  "history": [
+    {
+      "timestamp": "2026-04-16T13:57:00.000Z",
+      "action": "plan_created",
+      "feature": "theme-accuracy-fix"
+    },
+    {
+      "timestamp": "2026-04-16T14:05:00.000Z",
+      "action": "design_created",
+      "feature": "theme-accuracy-fix"
+    },
+    {
+      "timestamp": "2026-04-16T14:20:00.000Z",
+      "action": "implementation_completed",
+      "feature": "theme-accuracy-fix",
+      "notes": "theme_radar_service 수정, verify_theme_detections.py 신규, .gitignore 업데이트, 스팟 테스트 4/4 통과"
+    },
+    {
+      "timestamp": "2026-04-16T23:20:00.000Z",
+      "action": "gap_analysis_completed",
+      "feature": "theme-accuracy-fix",
+      "matchRate": 100,
+      "notes": "gap-detector 초안 97.1% → selectinload 미사용 import 제거 → 100%"
+    }
+  ]
 }

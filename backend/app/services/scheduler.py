@@ -11,7 +11,7 @@ from sqlalchemy import delete
 from app.config import settings
 from app.database import async_session
 from app.models.brief import DailyBrief
-from app.services import brief_service, daily_report_service, telegram_service, watchlist_service
+from app.services import brief_service, daily_report_service, telegram_service, theme_discovery_service, theme_radar_service, watchlist_service
 
 logger = logging.getLogger(__name__)
 
@@ -111,10 +111,31 @@ async def _daily_report():
         await telegram_service.send_text("⚠️ 일일 리포트 생성 중 오류가 발생했습니다.")
 
 
-async def _cleanup_old_data():
-    """90일 이전 데이터 삭제"""
+async def _weekly_theme_scan():
+    """주 1회 테마 선행 스캐너 (매주 월요일 08:00)"""
+    logger.info("주간 테마 스캔 시작")
     try:
-        cutoff = date.today() - timedelta(days=90)
+        results = await theme_radar_service.scan_all_themes()
+        total_new = sum(results.values())
+        logger.info("주간 테마 스캔 완료 — 신규 감지 %d건: %s", total_new, results)
+    except Exception:
+        logger.exception("주간 테마 스캔 실패")
+
+
+async def _weekly_theme_discovery():
+    """주 1회 아카이브 기반 테마 발굴 (매주 일요일 09:00)"""
+    logger.info("주간 테마 발굴 시작")
+    try:
+        await theme_discovery_service.send_weekly_theme_report()
+        logger.info("주간 테마 발굴 완료")
+    except Exception:
+        logger.exception("주간 테마 발굴 실패")
+
+
+async def _cleanup_old_data():
+    """180일 이전 데이터 삭제 — 테마 발굴용 누적 데이터 확보"""
+    try:
+        cutoff = date.today() - timedelta(days=180)
         async with async_session() as session:
             result = await session.execute(
                 delete(DailyBrief).where(DailyBrief.date < cutoff)
@@ -136,11 +157,22 @@ def start_scheduler():
         _daily_report, "cron", hour=16, minute=30,
         id="daily_report", day_of_week="mon-fri",
     )
+    scheduler.add_job(
+        _weekly_theme_scan, "cron",
+        day_of_week="mon", hour=8, minute=0,
+        id="weekly_theme_scan",
+    )
+    scheduler.add_job(
+        _weekly_theme_discovery, "cron",
+        day_of_week="sun", hour=9, minute=0,
+        id="weekly_theme_discovery",
+    )
     scheduler.add_job(_cleanup_old_data, "cron", hour=18, minute=0, id="cleanup")
 
     scheduler.start()
     logger.info(
-        "스케줄러 시작: %02d:00 브리프 | 12:00 점심체크 | 16:30 일일리포트 | 18:00 정리", hour
+        "스케줄러 시작: %02d:00 브리프 | 12:00 점심체크 | 16:30 일일리포트 | 월 08:00 테마스캔 | 일 09:00 테마발굴 | 18:00 정리",
+        hour,
     )
 
 
