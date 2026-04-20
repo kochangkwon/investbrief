@@ -6,3 +6,9 @@ __pycache__/
 .venv/
 node_modules/
 .next/
+
+# 백업 파일 (절대 커밋 금지)
+*.bak
+*.backup
+.env.backup
+.env.bak

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -24,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("InvestBrief 서버 시작 (port %d)", settings.backend_port)
+    port = int(os.getenv("PORT", settings.backend_port))
+    logger.info("InvestBrief 서버 시작 (port %d)", port)
     await init_db()
     logger.info("DB 초기화 완료")
     start_scheduler()
@@ -37,9 +39,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="InvestBrief", version="0.1.0", lifespan=lifespan)
 
+# CORS — 로컬 + Vercel 프론트엔드 허용
+allowed_origins = [
+    f"http://localhost:{settings.frontend_port}",
+    "http://localhost:3001",
+    "http://localhost:3000",
+]
+
+# FRONTEND_URL 환경변수로 추가 허용 도메인 주입 (Vercel URL 등)
+frontend_url = os.getenv("FRONTEND_URL", "").strip()
+if frontend_url:
+    allowed_origins.append(frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[f"http://localhost:{settings.frontend_port}"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,4 +68,5 @@ app.include_router(stock_router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.backend_port, reload=True)
+    port = int(os.getenv("PORT", settings.backend_port))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)

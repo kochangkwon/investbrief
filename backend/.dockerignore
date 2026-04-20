@@ -1,0 +1,61 @@
+# Python
+
+**pycache**/
+_.pyc
+_.pyo
+_.pyd
+.Python
+_.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+
+.venv/
+venv/
+env/
+
+# Local DB (Koyeb에서 Neon 사용하므로 불필요)
+
+_.db
+_.db-journal
+_.db.bak-_
+investbrief.db\*
+
+# Env files (Koyeb 대시보드에서 주입)
+
+.env
+.env.\*
+!.env.example
+
+# IDE / OS
+
+.vscode/
+.idea/
+.DS_Store
+\*.swp
+
+# Git
+
+.git/
+.gitignore
+
+# Docs & instructions
+
+docs/
+instructions/
+.claude/
+CLAUDE.md
+README.md
+
+# Tests
+
+tests/
+test\__.py
+_\_test.py
+
+# Logs
+
+\*.log
+logs/

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import delete
@@ -13,15 +14,15 @@ from app.database import async_session
 from app.models.brief import DailyBrief
 from app.services import brief_service, daily_report_service, telegram_service, theme_discovery_service, theme_radar_service, watchlist_service
 
+KST = ZoneInfo("Asia/Seoul")
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone=KST)
 
 
 def _is_weekday() -> bool:
-    """평일 여부 (토/일 제외)"""
-    return date.today().weekday() < 5
-
+    """평일 여부 (KST 기준, 토/일 제외)"""
+    return datetime.now(KST).weekday() < 5
 
 async def _generate_and_send():
     """매일 아침 브리프 생성 + 텔레그램 발송"""
