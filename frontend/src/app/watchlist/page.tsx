@@ -12,27 +12,22 @@ export default function WatchlistPage() {
   const [memo, setMemo] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [sel, setSel] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   async function load() {
     const data = await fetchWatchlist();
-    setItems(data);
-    setLoading(false);
+    setItems(data); setLoading(false);
   }
-
   useEffect(() => { load(); }, []);
 
-  function handleQueryChange(value: string) {
-    setQuery(value);
+  function handleQueryChange(v: string) {
+    setQuery(v);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!value.trim()) {
-      setResults([]);
-      return;
-    }
+    if (!v.trim()) { setResults([]); return; }
     debounceRef.current = setTimeout(async () => {
       setSearching(true);
-      const res = await searchStocks(value.trim());
-      setResults(res);
+      setResults(await searchStocks(v.trim()));
       setSearching(false);
     }, 300);
   }
@@ -41,111 +36,186 @@ export default function WatchlistPage() {
     setError("");
     try {
       await addWatchlist(stock.stock_code, stock.stock_name, memo.trim() || undefined);
-      setQuery("");
-      setResults([]);
-      setMemo("");
-      load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "추가 실패");
-    }
+      setQuery(""); setResults([]); setMemo(""); load();
+    } catch (e) { setError(e instanceof Error ? e.message : "추가 실패"); }
+  }
+  async function handleRemove(code: string) {
+    await removeWatchlist(code); load();
   }
 
-  async function handleRemove(stock_code: string) {
-    await removeWatchlist(stock_code);
-    load();
-  }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      if (e.key === "j" || e.key === "ArrowDown") setSel((s) => Math.min(items.length - 1, s + 1));
+      else if (e.key === "k" || e.key === "ArrowUp") setSel((s) => Math.max(0, s - 1));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [items.length]);
 
-  if (loading) {
-    return <div className="flex items-center justify-center py-32 text-gray-400 text-sm animate-pulse">로딩 중...</div>;
-  }
+  if (loading) return <div className="py-32 text-center ib-faint ib-mono text-sm">LOADING...</div>;
 
   return (
-    <div className="space-y-5">
-      <h1 className="text-lg font-bold text-gray-800">🔍 관심종목</h1>
-
-      {/* 종목 검색 */}
-      <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-visible">
-        <div className="p-4">
-          <div className="flex gap-2 flex-col sm:flex-row">
-            <div className="relative flex-1">
-              <input
-                value={query}
-                onChange={(e) => handleQueryChange(e.target.value)}
-                placeholder="종목명 또는 종목코드 검색"
-                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-200 transition"
-              />
-              {searching && (
-                <div className="absolute right-3 top-2.5">
-                  <div className="w-3.5 h-3.5 border-2 border-gray-200 border-t-gray-500 rounded-full animate-spin" />
-                </div>
-              )}
-
-              {/* 검색 결과 드롭다운 */}
-              {results.length > 0 && (
-                <div className="absolute z-20 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
-                  {results.map((stock) => {
-                    const alreadyAdded = items.some((w) => w.stock_code === stock.stock_code);
-                    return (
-                      <button
-                        key={stock.stock_code}
-                        onClick={() => !alreadyAdded && handleAdd(stock)}
-                        disabled={alreadyAdded}
-                        className={`w-full text-left px-3 py-2 text-sm flex justify-between items-center ${
-                          alreadyAdded
-                            ? "bg-gray-50 text-gray-300 cursor-default"
-                            : "hover:bg-gray-50 text-gray-700"
-                        }`}
-                      >
-                        <div>
-                          <span className="font-medium">{stock.stock_name}</span>
-                          <span className="text-gray-300 text-xs ml-2">{stock.stock_code}</span>
-                        </div>
-                        <span className="text-[10px] text-gray-300">{alreadyAdded ? "등록됨" : stock.market}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            <input
-              value={memo}
-              onChange={(e) => setMemo(e.target.value)}
-              placeholder="메모 (선택)"
-              className="border border-gray-200 rounded-lg px-3 py-2 text-sm sm:w-40 focus:outline-none focus:ring-2 focus:ring-gray-200 transition"
-            />
-          </div>
-          {error && <p className="text-rose-500 text-xs mt-2">{error}</p>}
-        </div>
+    <div className="space-y-4">
+      <div className="flex items-baseline gap-4">
+        <h1 className="ib-serif" style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.015em", margin: 0 }}>
+          관심종목
+        </h1>
+        <div className="ib-label">{items.length} 종목</div>
       </div>
 
-      {/* 관심종목 목록 */}
+      {/* Stats */}
+      <div className="grid grid-cols-4 gap-3">
+        <StatTile k="총 종목" v={String(items.length)} d="MAX 50" />
+        <StatTile k="메모 있음" v={String(items.filter(i => i.memo).length)} d="MEMO" />
+        <StatTile k="오늘 추가" v={String(items.filter(i => {
+          const d = new Date(i.created_at);
+          const today = new Date();
+          return d.toDateString() === today.toDateString();
+        }).length)} d="TODAY" tone="info" />
+        <StatTile k="상태" v="LIVE" d="SYNCED" tone="up" />
+      </div>
+
+      {/* Toolbar */}
+      <div className="flex items-center gap-2 flex-wrap" style={{
+        padding: "12px 14px", background: "var(--ib-bg-sunk)", border: "1px solid var(--ib-line)", borderBottom: 0,
+      }}>
+        <div className="relative flex-1 min-w-[320px]">
+          <div className="ib-input flex items-center gap-2">
+            <span className="ib-faint">⌕</span>
+            <input
+              value={query}
+              onChange={(e) => handleQueryChange(e.target.value)}
+              placeholder="종목명 · 종목코드 검색 (예: 삼성전자 · 005930)"
+              className="flex-1 outline-none bg-transparent ib-mono"
+              style={{ fontSize: 12, color: "var(--ib-ink)" }}
+            />
+            {searching && <span className="ib-faint ib-mono" style={{ fontSize: 10 }}>...</span>}
+          </div>
+          {results.length > 0 && (
+            <div className="absolute z-20 left-0 right-0 top-full mt-1 ib-card max-h-60 overflow-y-auto">
+              {results.map((s) => {
+                const added = items.some((w) => w.stock_code === s.stock_code);
+                return (
+                  <button
+                    key={s.stock_code}
+                    onClick={() => !added && handleAdd(s)}
+                    disabled={added}
+                    className="w-full text-left flex justify-between items-center px-3 py-2"
+                    style={{
+                      borderBottom: "1px solid var(--ib-line-soft)",
+                      color: added ? "var(--ib-ink-faint)" : "var(--ib-ink)",
+                      cursor: added ? "default" : "pointer",
+                      fontSize: 12,
+                    }}
+                  >
+                    <span>
+                      <span style={{ fontWeight: 600 }}>{s.stock_name}</span>
+                      <span className="ib-mono ib-faint ml-2" style={{ fontSize: 10 }}>{s.stock_code}</span>
+                    </span>
+                    <span className="ib-mono ib-faint" style={{ fontSize: 10 }}>{added ? "등록됨" : s.market}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <input
+          value={memo} onChange={(e) => setMemo(e.target.value)}
+          placeholder="메모 (선택)" className="ib-input w-40"
+        />
+        <button className="ib-btn ib-btn--primary">+ 추가</button>
+        {error && <p className="ib-dn ib-mono w-full" style={{ fontSize: 11 }}>{error}</p>}
+      </div>
+
+      {/* Table */}
       {items.length === 0 ? (
-        <div className="text-center py-16 text-gray-400 text-sm">
+        <div className="py-16 text-center ib-faint text-sm" style={{ border: "1px solid var(--ib-line)", background: "var(--ib-bg-elev)" }}>
           종목을 검색하여 관심종목을 추가하세요
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden divide-y divide-gray-50">
-          {items.map((item) => (
-            <div key={item.id} className="flex items-center justify-between px-4 py-3">
-              <div className="flex items-center gap-2 flex-wrap min-w-0">
-                <span className="font-medium text-sm text-gray-800">{item.stock_name}</span>
-                <span className="text-gray-300 text-xs">{item.stock_code}</span>
-                {item.memo && (
-                  <span className="text-xs text-gray-400 bg-gray-50 px-2 py-0.5 rounded truncate max-w-[150px]">
-                    {item.memo}
-                  </span>
-                )}
-              </div>
-              <button
-                onClick={() => handleRemove(item.stock_code)}
-                className="text-gray-300 hover:text-rose-500 text-xs transition-colors shrink-0 ml-2"
-              >
-                삭제
-              </button>
-            </div>
-          ))}
+        <div style={{ border: "1px solid var(--ib-line)", background: "var(--ib-bg-elev)", overflow: "auto" }}>
+          <table className="w-full" style={{ fontFamily: "var(--ib-mono)", fontSize: 12, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "var(--ib-bg-sunk)", color: "var(--ib-ink-faint)", borderBottom: "1px solid var(--ib-line)" }}>
+                {["#","종목","코드","메모","등록일",""].map((h, i) => (
+                  <th key={i} className="text-left px-3 py-2.5" style={{
+                    fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 500, whiteSpace: "nowrap",
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, i) => {
+                const isSel = i === sel;
+                const d = new Date(it.created_at);
+                return (
+                  <tr key={it.id}
+                    onClick={() => setSel(i)}
+                    style={{
+                      borderBottom: "1px solid var(--ib-line-soft)",
+                      background: isSel ? "color-mix(in oklch, var(--ib-warn) 14%, var(--ib-bg-elev))" : undefined,
+                      cursor: "pointer",
+                    }}>
+                    <td className="ib-faint px-3 py-2.5" style={{ width: 32 }}>{String(i+1).padStart(2,"0")}</td>
+                    <td className="px-3 py-2.5" style={{ fontFamily: "var(--ib-sans)", fontSize: 13, color: "var(--ib-ink)" }}>
+                      {it.stock_name}
+                    </td>
+                    <td className="ib-faint px-3 py-2.5">{it.stock_code}</td>
+                    <td className="ib-dim px-3 py-2.5 ib-serif" style={{ fontStyle: "italic", fontFamily: "var(--ib-serif)" }}>
+                      {it.memo || "—"}
+                    </td>
+                    <td className="ib-faint px-3 py-2.5">
+                      {String(d.getMonth()+1).padStart(2,"0")}/{String(d.getDate()).padStart(2,"0")}
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleRemove(it.stock_code); }}
+                        className="ib-mono"
+                        style={{ fontSize: 10, letterSpacing: "0.1em", color: "var(--ib-ink-faint)" }}
+                      >
+                        DEL
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
+
+      {/* Keyboard footer */}
+      <div className="flex gap-5" style={{
+        padding: "10px 14px", border: "1px solid var(--ib-line)", background: "var(--ib-bg-sunk)",
+        fontFamily: "var(--ib-mono)", fontSize: 10, color: "var(--ib-ink-faint)", letterSpacing: "0.1em",
+      }}>
+        <span><Kbd>J</Kbd>/<Kbd>K</Kbd> 아래/위</span>
+        <span><Kbd>/</Kbd> 검색</span>
+        <span><Kbd>1</Kbd>/<Kbd>2</Kbd>/<Kbd>3</Kbd> 페이지</span>
+        <span><Kbd>T</Kbd> 테마</span>
+      </div>
     </div>
+  );
+}
+
+function StatTile({ k, v, d, tone }: { k: string; v: string; d: string; tone?: "up"|"info"|"warn" }) {
+  const c = tone === "up" ? "var(--ib-up)" : tone === "info" ? "var(--ib-info)" : tone === "warn" ? "var(--ib-warn)" : "var(--ib-ink)";
+  return (
+    <div style={{ padding: 14, border: "1px solid var(--ib-line)", background: "var(--ib-bg-elev)" }}>
+      <div className="ib-label" style={{ color: "var(--ib-ink-dim)" }}>{k}</div>
+      <div className="ib-num" style={{ fontSize: 28, fontWeight: 600, marginTop: 6, letterSpacing: "-0.02em", color: c }}>{v}</div>
+      <div className="ib-mono" style={{ fontSize: 10, letterSpacing: "0.08em", marginTop: 2, color: "var(--ib-ink-dim)", opacity: 0.75 }}>{d}</div>
+    </div>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd style={{
+      display: "inline-block", padding: "1px 6px", border: "1px solid var(--ib-line)",
+      background: "var(--ib-bg-elev)", color: "var(--ib-ink)", fontFamily: "var(--ib-mono)", fontSize: 10, marginRight: 6,
+    }}>{children}</kbd>
   );
 }

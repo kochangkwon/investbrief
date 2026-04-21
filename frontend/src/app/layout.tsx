@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import ClientShell from "@/components/ClientShell";
+import NavBar from "@/components/NavBar";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -8,27 +10,21 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="ko" suppressHydrationWarning>
-      <body className="bg-[#f8f9fb] text-gray-900 min-h-screen antialiased">
-        <header className="bg-white border-b border-gray-100 sticky top-0 z-10 shadow-sm">
-          <nav className="max-w-3xl mx-auto px-4 h-12 flex items-center justify-between">
-            <a href="/" className="font-bold text-base tracking-tight text-gray-800">
-              ☀️ InvestBrief
-            </a>
-            <div className="flex gap-4">
-              <a href="/" className="text-sm text-gray-500 hover:text-gray-900 transition-colors">
-                오늘
-              </a>
-              <a href="/archive" className="text-sm text-gray-500 hover:text-gray-900 transition-colors">
-                아카이브
-              </a>
-              <a href="/watchlist" className="text-sm text-gray-500 hover:text-gray-900 transition-colors">
-                관심종목
-              </a>
-            </div>
-          </nav>
-        </header>
-        <main className="max-w-3xl mx-auto px-4 py-5">{children}</main>
+    <html lang="ko" data-theme="light" suppressHydrationWarning>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
+        <link
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,700;9..144,800&display=swap"
+          rel="stylesheet"
+        />
+      </head>
+      <body className="min-h-screen antialiased" style={{ background: "var(--ib-bg)", color: "var(--ib-ink)" }}>
+        <div className="max-w-[1440px] mx-auto px-7 pb-20">
+          <NavBar />
+          <main className="pt-5">{children}</main>
+        </div>
+        <ClientShell />
       </body>
     </html>
   );
