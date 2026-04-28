@@ -269,6 +269,36 @@ async def _send_theme_alert(theme_name: str, detections: list[dict[str, Any]]) -
     except Exception:
         logger.exception("테마 알림 전송 실패")
 
+    # ── v3 Phase 1: 측정 인프라 기록 (텔레그램 발송과 별도) ──
+    try:
+        from app.services.theme_alert_service import send_theme_alert
+        from app.database import async_session
+
+        candidates_data = [
+            {
+                "stock_code": d["stock_code"],
+                "stock_name": d["stock_name"],
+                "sub_theme": d.get("matched_keyword"),
+                "matched_news_title": d.get("headline"),
+            }
+            for d in detections
+        ]
+        theme_id = theme_name.replace(" ", "_").replace("/", "_")
+
+        async with async_session() as db:
+            alert_uid = await send_theme_alert(
+                theme_id=theme_id,
+                theme_name=theme_name,
+                candidates=candidates_data,
+                db=db,
+                use_inline_buttons=False,
+                skip_telegram=True,  # 위에서 이미 발송함 — 이중 발송 방지
+            )
+        if alert_uid:
+            logger.info("v3 측정 인프라 기록 완료: %s", alert_uid)
+    except Exception:
+        logger.exception("v3 측정 인프라 기록 실패 (알림은 정상 발송됨)")
+
 
 # ── CRUD (텔레그램 명령어에서 사용) ─────────────────────────────────────
 

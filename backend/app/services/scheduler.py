@@ -13,6 +13,8 @@ from app.config import settings
 from app.database import async_session
 from app.models.brief import DailyBrief
 from app.services import brief_service, daily_report_service, telegram_service, theme_discovery_service, theme_radar_service, watchlist_service
+from app.services.theme_alert_analytics import send_monthly_alert_report
+from app.services.theme_alert_tracker import update_alert_returns_for_target
 
 KST = ZoneInfo("Asia/Seoul")
 logger = logging.getLogger(__name__)
@@ -38,16 +40,32 @@ async def _generate_and_send():
                     logger.info("스케줄: 오늘 브리프 이미 발송됨, 스킵")
                     return
                 logger.info("스케줄: 오늘 브리프 존재, 미발송 → 발송 진행")
-                await telegram_service.send_brief(existing)
-                existing.sent_at = datetime.now()
-                await session.commit()
+                sent = await telegram_service.send_brief(existing)
+                if sent:
+                    existing.sent_at = datetime.now()
+                    await session.commit()
+                    logger.info("스케줄: 기존 브리프 재발송 성공")
+                else:
+                    logger.error("스케줄: 기존 브리프 재발송 실패 — sent_at 기록 보류")
+                    await telegram_service.send_text(
+                        "⚠️ 모닝브리프 발송에 실패했습니다. 다음 스케줄에 재시도합니다."
+                    )
                 return
 
             brief = await brief_service.generate_daily_brief(session)
-            await telegram_service.send_brief(brief)
-            brief.sent_at = datetime.now()
-            await session.commit()
-        logger.info("스케줄: 모닝브리프 완료")
+            sent = await telegram_service.send_brief(brief)
+            if sent:
+                brief.sent_at = datetime.now()
+                await session.commit()
+                logger.info("스케줄: 모닝브리프 완료")
+            else:
+                logger.error(
+                    "스케줄: 모닝브리프 발송 실패 (id=%s) — sent_at 기록 보류, 다음 스케줄에 재시도",
+                    brief.id,
+                )
+                await telegram_service.send_text(
+                    "⚠️ 모닝브리프 발송에 실패했습니다. 다음 스케줄에 재시도합니다."
+                )
     except Exception:
         logger.exception("스케줄: 모닝브리프 생성 실패")
         await telegram_service.send_text("⚠️ 모닝브리프 생성 중 오류가 발생했습니다.")
@@ -133,6 +151,34 @@ async def _weekly_theme_discovery():
         logger.exception("주간 테마 발굴 실패")
 
 
+async def _track_alert_returns_30d():
+    try:
+        await update_alert_returns_for_target(30)
+    except Exception:
+        logger.exception("스케줄: D+30 알림 가격 추적 실패")
+
+
+async def _track_alert_returns_60d():
+    try:
+        await update_alert_returns_for_target(60)
+    except Exception:
+        logger.exception("스케줄: D+60 알림 가격 추적 실패")
+
+
+async def _track_alert_returns_90d():
+    try:
+        await update_alert_returns_for_target(90)
+    except Exception:
+        logger.exception("스케줄: D+90 알림 가격 추적 실패")
+
+
+async def _monthly_alert_report():
+    try:
+        await send_monthly_alert_report()
+    except Exception:
+        logger.exception("스케줄: 월간 테마 알림 리포트 실패")
+
+
 async def _cleanup_old_data():
     """180일 이전 데이터 삭제 — 테마 발굴용 누적 데이터 확보"""
     try:
@@ -169,6 +215,25 @@ def start_scheduler():
         id="weekly_theme_discovery",
     )
     scheduler.add_job(_cleanup_old_data, "cron", hour=18, minute=0, id="cleanup")
+
+    # ── v3 Phase 3: 테마 알림 D+30/60/90 가격 추적 (매일 18:05/15/25) ──
+    scheduler.add_job(
+        _track_alert_returns_30d, "cron", hour=18, minute=5,
+        id="theme_alert_returns_30d", replace_existing=True, misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _track_alert_returns_60d, "cron", hour=18, minute=15,
+        id="theme_alert_returns_60d", replace_existing=True, misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _track_alert_returns_90d, "cron", hour=18, minute=25,
+        id="theme_alert_returns_90d", replace_existing=True, misfire_grace_time=3600,
+    )
+    # ── v3 Phase 4: 월간 리포트 (매월 1일 09:10) ──
+    scheduler.add_job(
+        _monthly_alert_report, "cron", day=1, hour=9, minute=10,
+        id="theme_alert_monthly_report", replace_existing=True, misfire_grace_time=3600 * 24,
+    )
 
     scheduler.start()
     logger.info(

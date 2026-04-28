@@ -1,6 +1,7 @@
 """텔레그램 봇 — 브리프 발송 + 명령어 처리"""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from typing import Any
@@ -13,9 +14,14 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API = "https://api.telegram.org/bot{token}"
 
+# 네트워크 일시 장애(ConnectTimeout 등)에 대비해 짧은 재시도 수행
+_SEND_TIMEOUT_SECONDS = 30.0
+_SEND_MAX_ATTEMPTS = 3
+_SEND_BACKOFF_BASE_SECONDS = 2.0
+
 
 async def _send_message(text: str, parse_mode: str = "HTML") -> bool:
-    """텔레그램 메시지 발송"""
+    """텔레그램 메시지 발송 — 실패 시 지수 백오프로 재시도"""
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         logger.warning("텔레그램 설정 미완료")
         return False
@@ -27,15 +33,41 @@ async def _send_message(text: str, parse_mode: str = "HTML") -> bool:
         "parse_mode": parse_mode,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-        logger.info("텔레그램 발송 성공")
-        return True
-    except Exception:
-        logger.exception("텔레그램 발송 실패")
-        return False
+    last_error: Exception | None = None
+    for attempt in range(1, _SEND_MAX_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=_SEND_TIMEOUT_SECONDS) as client:
+                resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                logger.info("텔레그램 발송 성공 (attempt=%d)", attempt)
+                return True
+            # 4xx는 재시도해도 실패 — 포맷/권한 문제일 가능성 → 바로 중단
+            if 400 <= resp.status_code < 500:
+                logger.error(
+                    "텔레그램 발송 실패 (non-retryable) attempt=%d status=%d body=%s",
+                    attempt, resp.status_code, resp.text[:500],
+                )
+                return False
+            # 5xx — 재시도 대상
+            logger.warning(
+                "텔레그램 발송 일시 실패 attempt=%d status=%d body=%s",
+                attempt, resp.status_code, resp.text[:300],
+            )
+            last_error = httpx.HTTPStatusError(
+                f"status {resp.status_code}", request=resp.request, response=resp,
+            )
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            last_error = e
+            logger.warning("텔레그램 발송 네트워크 오류 attempt=%d: %s", attempt, type(e).__name__)
+        except Exception as e:
+            last_error = e
+            logger.exception("텔레그램 발송 예기치 못한 오류 attempt=%d", attempt)
+
+        if attempt < _SEND_MAX_ATTEMPTS:
+            await asyncio.sleep(_SEND_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)))
+
+    logger.error("텔레그램 발송 최종 실패 (%d회 시도): %s", _SEND_MAX_ATTEMPTS, last_error)
+    return False
 
 
 def _format_market(data: dict[str, Any], title: str) -> str:
