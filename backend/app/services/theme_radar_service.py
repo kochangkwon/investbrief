@@ -17,6 +17,7 @@ from app.config import settings
 from app.database import async_session
 from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRun
 from app.services import telegram_service
+from app.services.prefilter_service import PrefilterResult, prefilter_stocks
 
 logger = logging.getLogger(__name__)
 
@@ -272,15 +273,48 @@ async def _scan_single_theme(
         logger.exception("테마 감지 저장 실패")
         return 0
 
-    if new_detections:
-        await _send_theme_alert(theme.name, new_detections)
-        if scan_date is not None:
-            try:
-                await save_scan_results(scan_date, theme.name, new_detections)
-            except Exception:
-                logger.exception("스캔 결과 DB 저장 실패: %s", theme.name)
+    if not new_detections:
+        return 0
 
-    return len(new_detections)
+    # ── 사전 필터 ───────────────────────────────────────────────
+    # Claude 검증 통과 종목 중 이미 폭등한/시총 작은 종목을 제외.
+    # ThemeDetection은 verified 전체로 유지 (다음 스캔의 중복 검증 방지).
+    # ThemeScanResult / 텔레그램 알림은 filtered만 노출.
+    codes = [d["stock_code"] for d in new_detections]
+    try:
+        prefilter_map: dict[str, PrefilterResult] = await prefilter_stocks(codes)
+    except Exception:
+        logger.exception("[prefilter] 호출 실패 — 보수적 통과: %s", theme.name)
+        prefilter_map = {}
+
+    filtered: list[dict[str, Any]] = []
+    rejected: list[tuple[dict[str, Any], list[str]]] = []
+    for d in new_detections:
+        result = prefilter_map.get(d["stock_code"])
+        if result is None or result.passed:
+            filtered.append(d)
+        else:
+            rejected.append((d, result.reasons))
+            logger.info(
+                "[prefilter] reject %s %s: %s",
+                d["stock_code"], d["stock_name"], result.reasons,
+            )
+
+    logger.info(
+        "[scan_single_theme] %s: verified=%d → filtered=%d (rejected=%d)",
+        theme.name, len(new_detections), len(filtered), len(rejected),
+    )
+
+    if filtered or rejected:
+        await _send_theme_alert(theme.name, filtered, rejected=rejected)
+
+    if scan_date is not None and filtered:
+        try:
+            await save_scan_results(scan_date, theme.name, filtered)
+        except Exception:
+            logger.exception("스캔 결과 DB 저장 실패: %s", theme.name)
+
+    return len(filtered)
 
 
 # ── 스캔 run / 결과 저장 헬퍼 (StockAI Pull API용) ─────────────────────
@@ -399,21 +433,43 @@ async def save_scan_results(
             logger.exception("테마 스캔 결과 commit 실패: %s", theme_name)
 
 
-async def _send_theme_alert(theme_name: str, detections: list[dict[str, Any]]) -> None:
-    """신규 감지 종목 텔레그램 알림"""
+async def _send_theme_alert(
+    theme_name: str,
+    detections: list[dict[str, Any]],
+    rejected: Optional[list[tuple[dict[str, Any], list[str]]]] = None,
+) -> None:
+    """신규 감지 종목 텔레그램 알림.
+
+    `rejected`는 사전 필터에서 제외된 종목 (종목정보, 사유) 리스트.
+    제공 시 메시지 하단에 최대 3건 + "외 N건" 표시.
+    """
     def escape(text: str) -> str:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     lines = [f"🎯 <b>테마 선행 포착 — {escape(theme_name)}</b>", ""]
-    lines.append(f"새로운 수혜주 후보 ({len(detections)}종목):")
-    lines.append("")
 
-    for d in detections[:10]:
-        headline = escape(d["headline"][:60])
-        lines.append(
-            f"• <b>{escape(d['stock_name'])}</b> ({d['stock_code']})\n"
-            f"   └ {escape(d['matched_keyword'])} · {headline}"
-        )
+    if detections:
+        lines.append(f"새로운 수혜주 후보 ({len(detections)}종목):")
+        lines.append("")
+        for d in detections[:10]:
+            headline = escape(d["headline"][:60])
+            lines.append(
+                f"• <b>{escape(d['stock_name'])}</b> ({d['stock_code']})\n"
+                f"   └ {escape(d['matched_keyword'])} · {headline}"
+            )
+    else:
+        lines.append("새로운 수혜주 후보 0종목 (사전 필터로 모두 제외)")
+
+    if rejected:
+        lines.append("")
+        lines.append(f"<i>사전 필터 제외: {len(rejected)}건</i>")
+        for d, reasons in rejected[:3]:
+            first = reasons[0] if reasons else "(사유 미상)"
+            lines.append(
+                f"  ⊘ {escape(d['stock_name'])} ({d['stock_code']}): {escape(first)}"
+            )
+        if len(rejected) > 3:
+            lines.append(f"  ⊘ … 외 {len(rejected) - 3}건")
 
     lines.append("")
     lines.append("/theme-list 로 전체 테마 확인")
