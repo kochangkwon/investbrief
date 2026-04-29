@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Internal API (StockAI ↔ InvestBrief)
+    stockai_internal_api_key: str = ""
+
     # Database
     database_url: str = "sqlite+aiosqlite:///./investbrief.db"
 

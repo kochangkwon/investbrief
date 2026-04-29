@@ -3,20 +3,24 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from datetime import date, datetime
+from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import anthropic
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.news_collector import _fetch_naver_news
 from app.collectors.stock_search import search_stocks
 from app.config import settings
 from app.database import async_session
-from app.models.theme import Theme, ThemeDetection
+from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRun
 from app.services import telegram_service
 
 logger = logging.getLogger(__name__)
+
+KST = ZoneInfo("Asia/Seoul")
 
 
 STOCK_NAME_PATTERN = re.compile(r"([가-힣][가-힣A-Za-z0-9]{1,14})")
@@ -122,28 +126,57 @@ async def _verify_theme_match(
 
 
 async def scan_all_themes() -> dict[str, int]:
-    """전체 활성 테마 스캔. {테마명: 신규감지건수} 반환."""
+    """전체 활성 테마 스캔. {테마명: 신규감지건수} 반환.
+
+    동시에 `theme_scan_runs` / `theme_scan_results` 테이블에 실행 메타데이터와
+    검증 통과 종목을 저장한다 (StockAI Pull 조회용).
+    """
+    scan_date = datetime.now(KST).date()
     results: dict[str, int] = {}
 
-    async with async_session() as session:
-        result = await session.execute(
-            select(Theme).where(Theme.enabled == True)  # noqa: E712
-        )
-        themes = list(result.scalars().all())
+    try:
+        await _start_scan_run(scan_date)
+    except Exception:
+        logger.exception("스캔 run 레코드 시작 실패 (스캔은 계속 진행)")
 
-    for theme in themes:
+    try:
+        async with async_session() as session:
+            result = await session.execute(
+                select(Theme).where(Theme.enabled == True)  # noqa: E712
+            )
+            themes = list(result.scalars().all())
+
+        total_stocks = 0
+        for theme in themes:
+            try:
+                async with async_session() as session:
+                    count = await _scan_single_theme(session, theme, scan_date=scan_date)
+                results[theme.name] = count
+                total_stocks += count
+            except Exception:
+                logger.exception("테마 스캔 실패: %s", theme.name)
+                results[theme.name] = 0
+
         try:
-            async with async_session() as session:
-                count = await _scan_single_theme(session, theme)
-            results[theme.name] = count
+            await _complete_scan_run(scan_date, total_themes=len(themes), total_stocks=total_stocks)
         except Exception:
-            logger.exception("테마 스캔 실패: %s", theme.name)
-            results[theme.name] = 0
+            logger.exception("스캔 run 완료 마킹 실패")
+
+    except Exception as e:
+        try:
+            await _fail_scan_run(scan_date, str(e))
+        except Exception:
+            logger.exception("스캔 run 실패 마킹 실패")
+        raise
 
     return results
 
 
-async def _scan_single_theme(session: AsyncSession, theme: Theme) -> int:
+async def _scan_single_theme(
+    session: AsyncSession,
+    theme: Theme,
+    scan_date: Optional[date] = None,
+) -> int:
     """단일 테마 스캔 — 신규 감지 종목 수 반환"""
     keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
     if not keywords:
@@ -241,8 +274,129 @@ async def _scan_single_theme(session: AsyncSession, theme: Theme) -> int:
 
     if new_detections:
         await _send_theme_alert(theme.name, new_detections)
+        if scan_date is not None:
+            try:
+                await save_scan_results(scan_date, theme.name, new_detections)
+            except Exception:
+                logger.exception("스캔 결과 DB 저장 실패: %s", theme.name)
 
     return len(new_detections)
+
+
+# ── 스캔 run / 결과 저장 헬퍼 (StockAI Pull API용) ─────────────────────
+
+
+async def _start_scan_run(scan_date: date) -> None:
+    """스캔 시작 — run 레코드 생성 또는 재시작 (idempotent).
+
+    같은 날짜 재실행 시 기존 레코드 상태를 'running'으로 리셋한다.
+    """
+    now = datetime.now(KST)
+    async with async_session() as session:
+        existing = await session.execute(
+            select(ThemeScanRun).where(ThemeScanRun.scan_date == scan_date)
+        )
+        run = existing.scalar_one_or_none()
+        if run:
+            run.status = "running"
+            run.started_at = now
+            run.completed_at = None
+            run.error_message = None
+            run.total_themes = 0
+            run.total_stocks = 0
+        else:
+            session.add(
+                ThemeScanRun(
+                    scan_date=scan_date,
+                    started_at=now,
+                    status="running",
+                )
+            )
+        await session.commit()
+
+
+async def _complete_scan_run(
+    scan_date: date,
+    total_themes: int,
+    total_stocks: int,
+) -> None:
+    async with async_session() as session:
+        await session.execute(
+            update(ThemeScanRun)
+            .where(ThemeScanRun.scan_date == scan_date)
+            .values(
+                status="completed",
+                completed_at=datetime.now(KST),
+                total_themes=total_themes,
+                total_stocks=total_stocks,
+            )
+        )
+        await session.commit()
+
+
+async def _fail_scan_run(scan_date: date, error: str) -> None:
+    async with async_session() as session:
+        await session.execute(
+            update(ThemeScanRun)
+            .where(ThemeScanRun.scan_date == scan_date)
+            .values(
+                status="failed",
+                completed_at=datetime.now(KST),
+                error_message=error[:1000],
+            )
+        )
+        await session.commit()
+
+
+async def save_scan_results(
+    scan_date: date,
+    theme_name: str,
+    new_detections: list[dict[str, Any]],
+) -> None:
+    """검증 통과된 종목들을 `theme_scan_results`에 저장.
+
+    UNIQUE(scan_date, theme_name, stock_code) 충돌 시 SELECT로 사전 확인 후 skip
+    (SQLite/Postgres 양쪽 호환).
+    """
+    if not new_detections:
+        return
+
+    async with async_session() as session:
+        for d in new_detections:
+            stock_code = d.get("stock_code")
+            stock_name = d.get("stock_name")
+            if not stock_code or not stock_name:
+                continue
+
+            existing = await session.execute(
+                select(ThemeScanResult.id).where(
+                    ThemeScanResult.scan_date == scan_date,
+                    ThemeScanResult.theme_name == theme_name,
+                    ThemeScanResult.stock_code == stock_code,
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue
+
+            keyword = d.get("matched_keyword")
+            keywords_list = [keyword] if keyword else []
+
+            session.add(
+                ThemeScanResult(
+                    scan_date=scan_date,
+                    theme_name=theme_name,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    detected_keywords=keywords_list,
+                    source_url=d.get("url"),
+                    claude_validation_passed=True,
+                )
+            )
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("테마 스캔 결과 commit 실패: %s", theme_name)
 
 
 async def _send_theme_alert(theme_name: str, detections: list[dict[str, Any]]) -> None:

@@ -110,7 +110,12 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 async def init_db():
     """테이블 자동 생성 (Neon에 최초 1회, 이후엔 IF NOT EXISTS로 skip)"""
     # 모델 import 보장 (Base.metadata에 등록되도록)
-    from app.models import DailyBrief, Watchlist  # noqa: F401
+    from app.models import (  # noqa: F401
+        DailyBrief,
+        ThemeScanResult,
+        ThemeScanRun,
+        Watchlist,
+    )
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
