@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -24,7 +24,16 @@ logger = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
 
-STOCK_NAME_PATTERN = re.compile(r"([가-힣][가-힣A-Za-z0-9]{1,14})")
+# 종목명 추출 정규식
+# - 영문/한글 시작 모두 허용 (LG, SK, HD, KT&G, POSCO 등 대형주 매칭)
+# - 후속 글자: 영문/한글/숫자/& (KT&G, F&F 등)
+# - 길이 2~15자 (한 글자 단어 후속 처리에서 제외)
+STOCK_NAME_PATTERN = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9&]{1,14})")
+
+# ThemeDetection 중복 검증 윈도우 (일).
+# 같은 종목을 이 기간 이내 다시 검증하지 않는다 (Claude API 비용 절약).
+# 윈도우가 지나면 다시 검증 → 폭등 후 정상화된 종목을 매수 적기에 재검출.
+DETECTION_WINDOW_DAYS = 14
 
 # ── Claude 검증 레이어 상수 ────────────────────────────────────────────
 _VERIFY_MAX_TOKENS = 150
@@ -229,8 +238,13 @@ async def _scan_single_theme(
     if not detected_stocks:
         return 0
 
+    # 중복 검증 윈도우 — DETECTION_WINDOW_DAYS 이내 검증한 종목만 SKIP.
+    # 그 이전 레코드는 무시 → 폭등 후 RSI 정상화된 종목을 매수 적기에 재검증.
+    cutoff = datetime.now() - timedelta(days=DETECTION_WINDOW_DAYS)
     existing_result = await session.execute(
-        select(ThemeDetection.stock_code).where(ThemeDetection.theme_id == theme.id)
+        select(ThemeDetection.stock_code)
+        .where(ThemeDetection.theme_id == theme.id)
+        .where(ThemeDetection.detected_at >= cutoff)
     )
     existing_codes = set(existing_result.scalars().all())
 

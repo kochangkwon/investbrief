@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -43,8 +44,12 @@ class Theme(Base):
 
 
 class ThemeDetection(Base):
-    """테마 스캔으로 감지된 종목 — 중복 알림 방지용"""
+    """테마 스캔으로 감지된 종목 — 14일 윈도우 내 중복 검증 방지용"""
     __tablename__ = "theme_detection"
+    __table_args__ = (
+        # (theme_id, detected_at) 복합 인덱스 — 윈도우 쿼리 가속용
+        Index("ix_theme_detection_theme_detected", "theme_id", "detected_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     theme_id: Mapped[int] = mapped_column(
@@ -56,7 +61,7 @@ class ThemeDetection(Base):
     matched_keyword: Mapped[str] = mapped_column(String(100))
     news_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     detected_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, default=datetime.datetime.now
+        DateTime, default=datetime.datetime.now, index=True
     )
 
 
