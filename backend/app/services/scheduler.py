@@ -130,15 +130,15 @@ async def _daily_report():
         await telegram_service.send_text("⚠️ 일일 리포트 생성 중 오류가 발생했습니다.")
 
 
-async def _weekly_theme_scan():
-    """주 1회 테마 선행 스캐너 (매주 월요일 08:00)"""
-    logger.info("주간 테마 스캔 시작")
+async def _daily_theme_scan():
+    """평일 매일 테마 선행 스캐너 (08:10 KST)"""
+    logger.info("일일 테마 스캔 시작")
     try:
         results = await theme_radar_service.scan_all_themes()
         total_new = sum(results.values())
-        logger.info("주간 테마 스캔 완료 — 신규 감지 %d건: %s", total_new, results)
+        logger.info("일일 테마 스캔 완료 — 신규 감지 %d건: %s", total_new, results)
     except Exception:
-        logger.exception("주간 테마 스캔 실패")
+        logger.exception("일일 테마 스캔 실패")
 
 
 async def _weekly_theme_discovery():
@@ -196,6 +196,13 @@ async def _cleanup_old_data():
 
 def start_scheduler():
     """스케줄러 시작"""
+    # 구버전 job ID 잔재 정리 (영속 jobstore 사용 시 안전장치 — 1회용)
+    try:
+        scheduler.remove_job("weekly_theme_scan")
+        logger.info("구 job 'weekly_theme_scan' 제거")
+    except Exception:
+        pass  # 없으면 정상
+
     hour = settings.brief_send_hour
 
     scheduler.add_job(_generate_and_send, "cron", hour=hour, minute=settings.brief_send_minute, id="morning_brief")
@@ -205,9 +212,12 @@ def start_scheduler():
         id="daily_report", day_of_week="mon-fri",
     )
     scheduler.add_job(
-        _weekly_theme_scan, "cron",
-        day_of_week="mon", hour=8, minute=0,
-        id="weekly_theme_scan",
+        _daily_theme_scan, "cron",
+        day_of_week="mon-fri",  # 평일 매일 (주말 한국 증시 휴장)
+        hour=8, minute=10,
+        id="daily_theme_scan",
+        replace_existing=True,
+        misfire_grace_time=300,  # 서버 재시작 등으로 5분 내 늦어져도 재시도 허용
     )
     scheduler.add_job(
         _weekly_theme_discovery, "cron",
@@ -237,8 +247,8 @@ def start_scheduler():
 
     scheduler.start()
     logger.info(
-        "스케줄러 시작: %02d:00 브리프 | 12:00 점심체크 | 16:30 일일리포트 | 월 08:00 테마스캔 | 일 09:00 테마발굴 | 18:00 정리",
-        hour,
+        "스케줄러 시작: %02d:%02d 브리프 | 12:00 점심체크 | 16:30 일일리포트 | 평일 08:10 일일테마스캔 | 일 09:00 테마발굴 | 18:00 정리",
+        hour, settings.brief_send_minute,
     )
 
 
