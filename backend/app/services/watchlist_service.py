@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
-
-from datetime import timedelta
 
 import FinanceDataReader as fdr
 from sqlalchemy import delete, select
@@ -53,13 +51,25 @@ async def list_all(session: AsyncSession) -> list[Watchlist]:
     return list(result.scalars().all())
 
 
-def _get_stock_price_sync(stock_code: str) -> dict[str, Any] | None:
-    """FinanceDataReader로 종목 가격 조회 — 동기 함수"""
+def _get_stock_price_sync(
+    stock_code: str, target_date: date | None = None
+) -> dict[str, Any] | None:
+    """FinanceDataReader로 종목 가격 조회 — 동기 함수
+
+    target_date가 지정되면 그 일자 기준 종가/등락 (백필용).
+    """
     try:
-        start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        df = fdr.DataReader(stock_code, start)
+        anchor = target_date or datetime.now().date()
+        start = (anchor - timedelta(days=14)).strftime("%Y-%m-%d")
+        end = (anchor + timedelta(days=1)).strftime("%Y-%m-%d")
+        df = fdr.DataReader(stock_code, start, end)
         if len(df) < 1:
             return None
+
+        if target_date is not None:
+            df = df[df.index.date <= target_date]
+            if df.empty:
+                return None
 
         close = float(df["Close"].iloc[-1])
         if len(df) >= 2:
@@ -80,23 +90,27 @@ def _get_stock_price_sync(stock_code: str) -> dict[str, Any] | None:
         return None
 
 
-async def _get_stock_price(stock_code: str) -> dict[str, Any] | None:
+async def _get_stock_price(
+    stock_code: str, target_date: date | None = None
+) -> dict[str, Any] | None:
     """FDR 동기 호출을 스레드풀로 실행"""
-    return await asyncio.to_thread(_get_stock_price_sync, stock_code)
+    return await asyncio.to_thread(_get_stock_price_sync, stock_code, target_date)
 
 
-async def check_watchlist(session: AsyncSession) -> list[dict[str, Any]]:
-    """관심종목별 오늘의 변동사항 체크"""
+async def check_watchlist(
+    session: AsyncSession, target_date: date | None = None
+) -> list[dict[str, Any]]:
+    """관심종목별 변동사항 체크 (target_date 지정 시 해당 일자 기준 백필)"""
     items = await list_all(session)
     if not items:
         return []
 
-    # DART 공시 한 번만 조회
-    all_disclosures = await dart_collector.get_today_disclosures()
+    # DART 공시 한 번만 조회 (target_date 전파)
+    all_disclosures = await dart_collector.get_today_disclosures(target_date=target_date)
 
     # 시세 일괄 병렬 조회
     price_results = await asyncio.gather(
-        *[_get_stock_price(w.stock_code) for w in items],
+        *[_get_stock_price(w.stock_code, target_date) for w in items],
         return_exceptions=True,
     )
     price_map: dict[str, dict[str, Any] | None] = {}
@@ -116,7 +130,13 @@ async def check_watchlist(session: AsyncSession) -> list[dict[str, Any]]:
 
         # 2. 뉴스 (네이버 검색 — 상위 2건)
         try:
-            news = await news_collector._fetch_naver_news(w.stock_name)
+            display = 100 if target_date is not None else 10
+            news = await news_collector._fetch_naver_news(w.stock_name, display=display)
+            if target_date is not None:
+                news = [
+                    n for n in news
+                    if news_collector._parse_pub_date(n.get("published", "")) == target_date
+                ]
             filtered = [n for n in news if w.stock_name in n["title"]]
             if not filtered:
                 filtered = [n for n in news if w.stock_code in n["title"]]

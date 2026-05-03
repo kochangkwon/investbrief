@@ -36,13 +36,23 @@ async def get_brief(brief_date: date, session: AsyncSession = Depends(get_sessio
 
 
 @router.post("/generate")
-async def generate_brief(session: AsyncSession = Depends(get_session)):
-    """수동 브리프 생성 — 기존 브리프가 있으면 삭제 후 재생성"""
-    existing = await brief_service.get_brief_by_date(session, date.today())
+async def generate_brief(
+    target_date: date | None = None,
+    send: bool = True,
+    session: AsyncSession = Depends(get_session),
+):
+    """수동 브리프 생성 — 기존 브리프가 있으면 삭제 후 재생성
+
+    - target_date: 백필할 날짜 (미지정 시 오늘)
+    - send: 텔레그램 발송 여부 (백필 시 false 권장)
+    """
+    brief_date = target_date or date.today()
+    existing = await brief_service.get_brief_by_date(session, brief_date)
     if existing:
         await session.delete(existing)
         await session.commit()
         logger.info("기존 브리프 삭제 (id=%s, date=%s)", existing.id, existing.date)
-    brief = await brief_service.generate_daily_brief(session)
-    await telegram_service.send_brief(brief)
+    brief = await brief_service.generate_daily_brief(session, target_date=target_date)
+    if send:
+        await telegram_service.send_brief(brief)
     return brief

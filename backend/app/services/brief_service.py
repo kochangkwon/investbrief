@@ -25,16 +25,30 @@ async def _safe_collect(name: str, coro, default=None):
         return default if default is not None else {}
 
 
-async def generate_daily_brief(session: AsyncSession) -> DailyBrief:
-    """매일 아침 브리프 생성 파이프라인"""
+async def generate_daily_brief(
+    session: AsyncSession, target_date: date | None = None
+) -> DailyBrief:
+    """매일 아침 브리프 생성 파이프라인 (target_date 지정 시 백필)"""
+
+    brief_date = target_date or date.today()
 
     # 1. 데이터 수집 (개별 실패 허용)
-    logger.info("브리프 생성 시작")
+    logger.info("브리프 생성 시작 (date=%s)", brief_date)
     global_market, domestic_market, news_items, dart_items = await asyncio.gather(
-        _safe_collect("global_market", market_collector.get_global_summary(), {}),
-        _safe_collect("domestic_market", stock_collector.get_domestic_summary(), {}),
-        _safe_collect("news", news_collector.get_today_news(limit=20), []),
-        _safe_collect("dart", dart_collector.get_today_disclosures(), []),
+        _safe_collect(
+            "global_market", market_collector.get_global_summary(target_date=target_date), {}
+        ),
+        _safe_collect(
+            "domestic_market",
+            stock_collector.get_domestic_summary(target_date=target_date),
+            {},
+        ),
+        _safe_collect(
+            "news", news_collector.get_today_news(limit=20, target_date=target_date), []
+        ),
+        _safe_collect(
+            "dart", dart_collector.get_today_disclosures(target_date=target_date), []
+        ),
     )
 
     # 2. AI 요약
@@ -43,11 +57,13 @@ async def generate_daily_brief(session: AsyncSession) -> DailyBrief:
     )
 
     # 3. 관심종목 체크
-    watchlist_data = await _safe_collect("watchlist", watchlist_service.check_watchlist(session), [])
+    watchlist_data = await _safe_collect(
+        "watchlist", watchlist_service.check_watchlist(session, target_date=target_date), []
+    )
 
     # 4. 브리프 조립
     brief = DailyBrief(
-        date=date.today(),
+        date=brief_date,
         global_market=global_market,
         domestic_market=domestic_market,
         news_summary=news_summary,
