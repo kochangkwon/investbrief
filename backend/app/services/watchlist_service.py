@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Any
 
-import FinanceDataReader as fdr
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.collectors import dart_collector, news_collector
+from app.collectors import dart_collector, news_collector, price_collector
 from app.models.watchlist import Watchlist
 
 logger = logging.getLogger(__name__)
@@ -54,40 +53,20 @@ async def list_all(session: AsyncSession) -> list[Watchlist]:
 def _get_stock_price_sync(
     stock_code: str, target_date: date | None = None
 ) -> dict[str, Any] | None:
-    """FinanceDataReader로 종목 가격 조회 — 동기 함수
+    """종목 가격 조회 — 동기 함수 (개별 종목용 — round 0자리).
 
-    target_date가 지정되면 그 일자 기준 종가/등락 (백필용).
+    target_date 지정 시 그 일자 기준 종가/등락 (백필용).
     """
-    try:
-        anchor = target_date or datetime.now().date()
-        start = (anchor - timedelta(days=14)).strftime("%Y-%m-%d")
-        end = (anchor + timedelta(days=1)).strftime("%Y-%m-%d")
-        df = fdr.DataReader(stock_code, start, end)
-        if len(df) < 1:
-            return None
-
-        if target_date is not None:
-            df = df[df.index.date <= target_date]
-            if df.empty:
-                return None
-
-        close = float(df["Close"].iloc[-1])
-        if len(df) >= 2:
-            prev_close = float(df["Close"].iloc[-2])
-            change = close - prev_close
-            change_pct = (change / prev_close) * 100
-        else:
-            change = 0.0
-            change_pct = 0.0
-
-        return {
-            "close": round(close, 0),
-            "change": round(change, 0),
-            "change_pct": round(change_pct, 2),
-        }
-    except Exception:
-        logger.warning("주가 조회 실패: %s", stock_code)
+    result = price_collector.fetch_close_with_change(
+        stock_code, target_date=target_date
+    )
+    if result is None:
         return None
+    return {
+        "close": round(result["close"], 0),
+        "change": round(result["change"], 0),
+        "change_pct": round(result["change_pct"], 2),
+    }
 
 
 async def _get_stock_price(

@@ -10,48 +10,34 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-import FinanceDataReader as fdr
 from sqlalchemy import and_, select
 
+from app.collectors import price_collector
 from app.database import async_session
 from app.models.theme_alert import ThemeAlert, ThemeAlertCandidate
 
 logger = logging.getLogger(__name__)
 
 
-def _fetch_close_on_or_before_sync(stock_code: str, target: date) -> Optional[int]:
-    """target 이전(포함)의 가장 최근 영업일 종가 — 동기."""
-    try:
-        # 주말/공휴일 보정용으로 7일 이전부터 조회
-        start = target - timedelta(days=7)
-        df = fdr.DataReader(stock_code, start, target)
-        if df is None or df.empty:
-            return None
-        close = float(df["Close"].iloc[-1])
-        return int(close) if close else None
-    except Exception as e:
-        logger.warning("FDR 추적 가격 실패 %s @ %s: %s", stock_code, target, e)
-        return None
-
-
 async def _fetch_close_on_or_before(stock_code: str, target: date) -> Optional[int]:
-    return await asyncio.to_thread(_fetch_close_on_or_before_sync, stock_code, target)
-
-
-def _fetch_kospi_on_or_before_sync(target: date) -> Optional[float]:
-    try:
-        start = target - timedelta(days=7)
-        df = fdr.DataReader("KS11", start, target)
-        if df is None or df.empty:
-            return None
-        return float(df["Close"].iloc[-1])
-    except Exception as e:
-        logger.warning("FDR KOSPI 추적 실패 @ %s: %s", target, e)
-        return None
+    """target 이전(포함)의 가장 최근 영업일 종가 (원, 정수)."""
+    close = await asyncio.to_thread(
+        price_collector.fetch_last_close,
+        stock_code,
+        on_or_before=target,
+        lookback_days=7,
+    )
+    return int(close) if close else None
 
 
 async def _fetch_kospi_on_or_before(target: date) -> Optional[float]:
-    return await asyncio.to_thread(_fetch_kospi_on_or_before_sync, target)
+    """target 이전(포함)의 코스피 종가."""
+    return await asyncio.to_thread(
+        price_collector.fetch_last_close,
+        "KS11",
+        on_or_before=target,
+        lookback_days=7,
+    )
 
 
 def _column_names(target_n: int) -> tuple[str, str, str]:

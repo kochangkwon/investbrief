@@ -251,6 +251,9 @@ async def _handle_theme_discover(args: str) -> str:
     """
     /theme-discover [일수]
     아카이브에서 부상 테마 자동 발굴. 기본 30일.
+
+    v3: 자동 등록 활성화 — 발굴된 테마는 Theme DB에 즉시 등록되어
+    다음 월요일 08:00 theme_radar 스캔에 포함됨.
     """
     days = 30
     if args.strip():
@@ -272,16 +275,19 @@ async def _handle_theme_discover(args: str) -> str:
     if "error" in result:
         return f"❌ {result['error']}"
 
-    def escape(text: str) -> str:
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # v3: 자동 등록 (수동 실행도 활성화)
+    auto_register_summary = await theme_discovery_service.auto_register_from_analysis(
+        result["analysis"]
+    )
 
     message = (
         f"🎯 <b>테마 발굴 결과 ({days}일)</b>\n"
         f"뉴스 {result['news_count']}건 · 공시 {result['disclosure_count']}건 분석\n\n"
-        f"{escape(result['analysis'])}"
+        f"{telegram_service.escape_html(result['analysis'])}"
+        f"{auto_register_summary}"
     )
 
-    await theme_discovery_service._send_long_message(message)
+    await telegram_service.send_long_text(message)
     return ""
 
 
@@ -292,8 +298,7 @@ async def _handle_theme_trending() -> str:
     if not top_stocks:
         return "최근 30일 아카이브가 없습니다."
 
-    def escape(text: str) -> str:
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escape = telegram_service.escape_html
 
     lines = ["📊 <b>언급 빈도 TOP 10 (최근 30일)</b>", ""]
     for i, s in enumerate(top_stocks[:10], 1):

@@ -8,15 +8,14 @@ InvestBrief 적용 사항:
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import FinanceDataReader as fdr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.collectors import price_collector
 from app.models.theme_alert import ThemeAlert, ThemeAlertCandidate
 from app.services import telegram_service
 
@@ -25,42 +24,17 @@ logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────
 # 가격 스냅샷 헬퍼 (FDR 기반 — 전영업일 종가)
+# 통합 엔진: app.collectors.price_collector
 # ─────────────────────────────────────────────────────────
-def _fetch_close_price_sync(stock_code: str) -> Optional[int]:
-    """FDR로 종목 최근 종가 조회 (동기 — to_thread로 호출)."""
-    try:
-        end = date.today()
-        start = end - timedelta(days=10)
-        df = fdr.DataReader(stock_code, start, end)
-        if df is None or df.empty:
-            return None
-        close = float(df["Close"].iloc[-1])
-        return int(close) if close else None
-    except Exception as e:
-        logger.warning("FDR 가격 조회 실패 %s: %s", stock_code, e)
-        return None
-
-
 async def _fetch_close_price(stock_code: str) -> Optional[int]:
-    return await asyncio.to_thread(_fetch_close_price_sync, stock_code)
-
-
-def _fetch_kospi_close_sync() -> Optional[float]:
-    """코스피 최근 종가 (alpha 비교용)."""
-    try:
-        end = date.today()
-        start = end - timedelta(days=10)
-        df = fdr.DataReader("KS11", start, end)
-        if df is None or df.empty:
-            return None
-        return float(df["Close"].iloc[-1])
-    except Exception as e:
-        logger.warning("FDR KOSPI 조회 실패: %s", e)
-        return None
+    """종목 최근 종가 (정수 원). 데이터/0 → None."""
+    close = await asyncio.to_thread(price_collector.fetch_last_close, stock_code)
+    return int(close) if close else None
 
 
 async def _fetch_kospi_close() -> Optional[float]:
-    return await asyncio.to_thread(_fetch_kospi_close_sync)
+    """코스피 최근 종가 (alpha 비교용)."""
+    return await asyncio.to_thread(price_collector.fetch_last_close, "KS11")
 
 
 # ─────────────────────────────────────────────────────────
@@ -68,7 +42,7 @@ async def _fetch_kospi_close() -> Optional[float]:
 # ─────────────────────────────────────────────────────────
 def _build_message(theme_name: str, candidates: List[Dict[str, Any]]) -> str:
     def esc(text: str) -> str:
-        return html.escape(text or "")
+        return telegram_service.escape_html(text or "")
 
     lines = [f"🎯 <b>테마 알림 — {esc(theme_name)}</b>", ""]
     lines.append(f"수혜주 후보 ({len(candidates)}종목):")

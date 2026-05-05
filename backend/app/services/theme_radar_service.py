@@ -7,16 +7,14 @@ from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
-import anthropic
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.news_collector import _fetch_naver_news
 from app.collectors.stock_search import search_stocks
-from app.config import settings
 from app.database import async_session
 from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRun
-from app.services import telegram_service
+from app.services import ai_verifier, telegram_service
 from app.services.prefilter_service import PrefilterResult, prefilter_stocks
 
 logger = logging.getLogger(__name__)
@@ -35,12 +33,8 @@ STOCK_NAME_PATTERN = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9&]{1,14})")
 # 윈도우가 지나면 다시 검증 → 폭등 후 정상화된 종목을 매수 적기에 재검출.
 DETECTION_WINDOW_DAYS = 14
 
-# ── Claude 검증 레이어 상수 ────────────────────────────────────────────
-_VERIFY_MAX_TOKENS = 150
-_VERIFY_TIMEOUT_SEC = 15.0
-
-_VERDICT_RE = re.compile(r"VERDICT:\s*(YES|NO)", re.IGNORECASE)
-_REASON_RE = re.compile(r"REASON:\s*(.+?)(?:\n|$)", re.IGNORECASE | re.DOTALL)
+# ── Claude 검증 레이어 ─────────────────────────────────────────────────
+# 공통 호출/파싱은 ai_verifier.verify_with_claude로 위임. 여기서는 프롬프트만 보유.
 
 _VERIFY_PROMPT_TEMPLATE = """당신은 한국 주식 테마 분석 전문가입니다.
 
@@ -83,10 +77,6 @@ async def _verify_theme_match(
 
     Fail-closed: API key 없음 / 예외 / 파싱 실패 → (False, reason).
     """
-    if not settings.anthropic_api_key:
-        logger.warning("테마 검증 스킵: ANTHROPIC_API_KEY 없음")
-        return False, "no api key"
-
     prompt = _VERIFY_PROMPT_TEMPLATE.format(
         theme_name=theme_name,
         matched_keyword=matched_keyword,
@@ -95,41 +85,12 @@ async def _verify_theme_match(
         description=description or "(설명 없음)",
     )
 
-    try:
-        client = anthropic.AsyncAnthropic(
-            api_key=settings.anthropic_api_key,
-            timeout=_VERIFY_TIMEOUT_SEC,
-        )
-        response = await client.messages.create(
-            model=settings.ai_model,
-            max_tokens=_VERIFY_MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text if response.content else ""
-    except anthropic.RateLimitError:
-        logger.warning("테마 검증 rate limit: %s / %s", theme_name, stock_name)
-        return False, "rate limit"
-    except anthropic.APITimeoutError:
-        logger.warning("테마 검증 timeout: %s / %s", theme_name, stock_name)
-        return False, "timeout"
-    except Exception as e:
-        logger.exception("테마 검증 API 예외: %s / %s", theme_name, stock_name)
-        return False, f"api error: {type(e).__name__}"
-
-    verdict_match = _VERDICT_RE.search(raw)
-    if not verdict_match:
-        logger.warning(
-            "테마 검증 파싱 실패 (verdict): %s / %s / raw=%r",
-            theme_name, stock_name, raw[:200],
-        )
-        return False, "parse error"
-
-    verdict = verdict_match.group(1).upper() == "YES"
-
-    reason_match = _REASON_RE.search(raw)
-    reason = reason_match.group(1).strip() if reason_match else "(근거 미파싱)"
-
-    return verdict, reason
+    verdict, reason = await ai_verifier.verify_with_claude(
+        prompt,
+        log_context=f"theme={theme_name} stock={stock_name}",
+    )
+    # 정책: theme_radar는 fail-closed — 검증 실패(None)는 NO로 강등
+    return (verdict is True), reason
 
 
 # ── 스캔 엔진 (스케줄러/수동 스캔 진입점) ─────────────────────────────────
@@ -180,6 +141,59 @@ async def scan_all_themes() -> dict[str, int]:
         raise
 
     return results
+
+
+async def _verify_and_persist_detections(
+    session: AsyncSession,
+    theme: Theme,
+    detected_stocks: dict[str, dict[str, Any]],
+    existing_codes: set[str],
+) -> list[dict[str, Any]]:
+    """Claude 검증 통과 종목만 ThemeDetection으로 저장하고 통과분 반환.
+
+    - existing_codes에 이미 있는 종목은 검증 스킵 (중복 윈도우)
+    - 검증 실패(None/False)는 fail-closed로 제외
+    - DB commit 실패 시 rollback 후 빈 리스트 반환
+    """
+    new_detections: list[dict[str, Any]] = []
+    for stock_code, info in detected_stocks.items():
+        if stock_code in existing_codes:
+            continue
+
+        verdict, reason = await _verify_theme_match(
+            theme_name=theme.name,
+            matched_keyword=info["matched_keyword"],
+            stock_name=info["stock_name"],
+            title=info["headline"],
+            description=info.get("description", ""),
+        )
+        logger.info(
+            "테마 검증: theme=%s stock=%s(%s) verdict=%s reason=%s",
+            theme.name, info["stock_name"], stock_code,
+            "YES" if verdict else "NO", reason,
+        )
+        if not verdict:
+            continue
+
+        detection = ThemeDetection(
+            theme_id=theme.id,
+            stock_code=stock_code,
+            stock_name=info["stock_name"],
+            headline=info["headline"],
+            matched_keyword=info["matched_keyword"],
+            news_url=info["url"],
+        )
+        session.add(detection)
+        new_detections.append(info)
+
+    try:
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.exception("테마 감지 저장 실패")
+        return []
+
+    return new_detections
 
 
 async def _scan_single_theme(
@@ -248,45 +262,9 @@ async def _scan_single_theme(
     )
     existing_codes = set(existing_result.scalars().all())
 
-    new_detections: list[dict[str, Any]] = []
-    for stock_code, info in detected_stocks.items():
-        if stock_code in existing_codes:
-            continue
-
-        # Claude 검증 게이트 — 오탐 차단
-        verdict, reason = await _verify_theme_match(
-            theme_name=theme.name,
-            matched_keyword=info["matched_keyword"],
-            stock_name=info["stock_name"],
-            title=info["headline"],
-            description=info.get("description", ""),
-        )
-        logger.info(
-            "테마 검증: theme=%s stock=%s(%s) verdict=%s reason=%s",
-            theme.name, info["stock_name"], stock_code,
-            "YES" if verdict else "NO", reason,
-        )
-        if not verdict:
-            continue
-
-        detection = ThemeDetection(
-            theme_id=theme.id,
-            stock_code=stock_code,
-            stock_name=info["stock_name"],
-            headline=info["headline"],
-            matched_keyword=info["matched_keyword"],
-            news_url=info["url"],
-        )
-        session.add(detection)
-        new_detections.append(info)
-
-    try:
-        await session.commit()
-    except Exception:
-        await session.rollback()
-        logger.exception("테마 감지 저장 실패")
-        return 0
-
+    new_detections = await _verify_and_persist_detections(
+        session, theme, detected_stocks, existing_codes,
+    )
     if not new_detections:
         return 0
 
@@ -457,8 +435,7 @@ async def _send_theme_alert(
     `rejected`는 사전 필터에서 제외된 종목 (종목정보, 사유) 리스트.
     제공 시 메시지 하단에 최대 3건 + "외 N건" 표시.
     """
-    def escape(text: str) -> str:
-        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escape = telegram_service.escape_html
 
     lines = [f"🎯 <b>테마 선행 포착 — {escape(theme_name)}</b>", ""]
 

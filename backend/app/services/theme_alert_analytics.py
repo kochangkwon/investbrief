@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import html
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -112,7 +111,7 @@ async def _collect_monthly_stats(start_dt: datetime, end_dt: datetime) -> dict[s
 
 def _format_report(period_label: str, stats: dict[str, Any]) -> str:
     def esc(text: str) -> str:
-        return html.escape(text or "")
+        return telegram_service.escape_html(text or "")
 
     lines = [f"📊 <b>테마 알림 월간 리포트</b> ({esc(period_label)})", ""]
     lines.append(f"• 알림 건수: <b>{stats['alert_count']}</b>건")

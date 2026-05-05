@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
 from typing import Any
 
@@ -70,15 +69,24 @@ async def _send_message(text: str, parse_mode: str = "HTML") -> bool:
     return False
 
 
+def escape_html(text: str) -> str:
+    """텔레그램 HTML 모드용 이스케이프 (& < > 만 처리, 인용부호는 유지).
+
+    Telegram Bot API는 본문에서 `<`, `>`, `&`만 escape 요구하며 인용부호는 그대로 둬도 무방.
+    `html.escape`는 quote까지 escape하므로 종목명/뉴스 제목에 사용 시 시각적으로 어색.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _format_market(data: dict[str, Any], title: str) -> str:
     """시장 데이터를 텔레그램 포맷으로"""
     if not data:
         return ""
-    lines = [f"<b>{html.escape(title)}</b>"]
+    lines = [f"<b>{escape_html(title)}</b>"]
     for v in data.values():
         sign = "+" if v["change_pct"] > 0 else ""
         emoji = "🔴" if v["change_pct"] > 0 else "🔵" if v["change_pct"] < 0 else "⚪"
-        lines.append(f"  {emoji} {html.escape(v['label'])}: {v['close']:,.2f} ({sign}{v['change_pct']:.2f}%)")
+        lines.append(f"  {emoji} {escape_html(v['label'])}: {v['close']:,.2f} ({sign}{v['change_pct']:.2f}%)")
     return "\n".join(lines)
 
 
@@ -104,7 +112,7 @@ def format_brief(brief: Any) -> str:
 
     # AI 뉴스 요약
     parts.append("<b>📰 AI 뉴스 브리핑</b>")
-    parts.append(html.escape(brief.news_summary))
+    parts.append(escape_html(brief.news_summary))
     parts.append("")
 
     # DART 공시 (중요한 것만)
@@ -113,7 +121,7 @@ def format_brief(brief: Any) -> str:
     if important:
         parts.append(f"<b>📋 주요 공시</b> ({len(important)}건)")
         for d in important[:10]:
-            parts.append(f"  {d['importance']} {html.escape(d['corp_name'])}: {html.escape(d['title'])}")
+            parts.append(f"  {d['importance']} {escape_html(d['corp_name'])}: {escape_html(d['title'])}")
         parts.append("")
 
     # 관심종목
@@ -121,7 +129,7 @@ def format_brief(brief: Any) -> str:
     if watchlist:
         parts.append("<b>🔍 관심종목 체크</b>")
         for w in watchlist:
-            parts.append(f"  • {html.escape(w.get('stock_name', ''))}: {html.escape(w.get('summary', ''))}")
+            parts.append(f"  • {escape_html(w.get('stock_name', ''))}: {escape_html(w.get('summary', ''))}")
 
     return "\n".join(parts)
 
@@ -140,3 +148,28 @@ async def send_brief(brief: Any) -> bool:
 async def send_text(text: str) -> bool:
     """단순 텍스트 발송"""
     return await _send_message(text, parse_mode="HTML")
+
+
+async def send_long_text(text: str, max_length: int = 4000) -> None:
+    """긴 메시지를 라인 경계로 분할해 순차 발송 (텔레그램 4096자 제한 대응)"""
+    if len(text) <= max_length:
+        await send_text(text)
+        return
+
+    lines = text.split("\n")
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1
+        if current_len + line_len > max_length:
+            if current:
+                await send_text("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+
+    if current:
+        await send_text("\n".join(current))

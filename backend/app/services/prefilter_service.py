@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 from typing import Any, Optional
 
-import FinanceDataReader as fdr
 import pandas as pd
+
+from app.collectors import price_collector
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +72,11 @@ def _calc_ma(closes: list[float], period: int) -> Optional[float]:
 
 
 def _fetch_closes_sync(stock_code: str) -> list[float]:
-    """직전 180일 종가 (오름차순). 실패 시 빈 리스트."""
-    try:
-        end = datetime.now()
-        start = end - timedelta(days=180)
-        df = fdr.DataReader(
-            stock_code,
-            start.strftime("%Y-%m-%d"),
-            end.strftime("%Y-%m-%d"),
-        )
-    except Exception as e:
-        logger.warning("[prefilter] %s 가격 조회 실패: %s", stock_code, e)
-        return []
-    if df is None or df.empty or "Close" not in df.columns:
+    """직전 180일 종가 (오름차순). 실패/컬럼 누락 시 빈 리스트."""
+    end = date.today()
+    start = end - timedelta(days=180)
+    df = price_collector.fetch_close_history(stock_code, start=start, end=end)
+    if df is None or "Close" not in df.columns:
         return []
     return [float(c) for c in df["Close"].tolist() if pd.notna(c)]
 
@@ -92,34 +85,8 @@ async def _fetch_closes(stock_code: str) -> list[float]:
     return await asyncio.to_thread(_fetch_closes_sync, stock_code)
 
 
-def _fetch_market_cap_sync(stock_code: str) -> Optional[int]:
-    """KOSPI/KOSDAQ에서 종목코드의 시총(원) 조회. 미발견 시 None."""
-    for market in ("KOSPI", "KOSDAQ"):
-        try:
-            df = fdr.StockListing(market)
-        except Exception as e:
-            logger.warning(
-                "[prefilter] %s StockListing 실패 (%s): %s",
-                market, stock_code, e,
-            )
-            continue
-        if df is None or df.empty:
-            continue
-        if "Code" not in df.columns or "Marcap" not in df.columns:
-            continue
-        row = df[df["Code"] == stock_code]
-        if row.empty:
-            continue
-        try:
-            mcap = int(row["Marcap"].iloc[0])
-        except Exception:
-            return None
-        return mcap
-    return None
-
-
 async def _fetch_market_cap(stock_code: str) -> Optional[int]:
-    return await asyncio.to_thread(_fetch_market_cap_sync, stock_code)
+    return await asyncio.to_thread(price_collector.fetch_market_cap, stock_code)
 
 
 # ── 개별 필터 (순수 함수 — 데이터를 받아 판정) ─────────────────────

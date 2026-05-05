@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
-from datetime import timedelta
-
-import FinanceDataReader as fdr
-
-from app.collectors import dart_collector, news_collector
+from app.collectors import dart_collector, news_collector, price_collector
 from app.database import async_session
 from app.services import telegram_service, watchlist_service
 
@@ -19,11 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 def _fetch_stock_data_sync(stock_code: str) -> dict[str, Any] | None:
-    """FinanceDataReader로 종가/RSI/이동평균/거래량 수집 — 동기 함수"""
+    """종가/RSI/이동평균/거래량 수집 — 동기 함수.
+
+    raw 시계열은 price_collector.fetch_close_history로 가져온 뒤
+    여기서 RSI/MA/거래량 비율을 계산한다 (도메인 로직).
+    """
     try:
-        start = (date.today() - timedelta(days=120)).strftime("%Y-%m-%d")
-        df = fdr.DataReader(stock_code, start)
-        if len(df) < 2:
+        start = date.today() - timedelta(days=120)
+        df = price_collector.fetch_close_history(stock_code, start=start)
+        if df is None or len(df) < 2:
             return None
 
         close = float(df["Close"].iloc[-1])
@@ -90,7 +89,7 @@ async def generate_daily_report() -> str | None:
     lines = [f"📊 <b>관심종목 일일 리포트</b> ({today_str})", ""]
 
     for w in items:
-        lines.append(f"<b>{html.escape(w.stock_name)}</b> ({w.stock_code})")
+        lines.append(f"<b>{telegram_service.escape_html(w.stock_name)}</b> ({w.stock_code})")
 
         # 주가 데이터
         data = await _fetch_stock_data(w.stock_code)

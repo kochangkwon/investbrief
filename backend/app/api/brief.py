@@ -1,4 +1,5 @@
 """브리프 API 라우터"""
+from __future__ import annotations
 
 import logging
 from datetime import date

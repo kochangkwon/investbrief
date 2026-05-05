@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
-import FinanceDataReader as fdr
 import httpx
+
+from app.collectors import price_collector
 
 logger = logging.getLogger(__name__)
 
@@ -33,35 +34,15 @@ async def _fetch_naver_basic(symbol: str) -> dict[str, Any]:
 
 
 def _fetch_fdr_sync(code: str, target_date: date) -> dict[str, Any] | None:
-    """FDR로 target_date 기준 종가/등락 조회"""
-    try:
-        start = (target_date - timedelta(days=14)).isoformat()
-        end = (target_date + timedelta(days=1)).isoformat()
-        df = fdr.DataReader(code, start, end)
-        if df.empty:
-            return None
-        # target_date 이하 행만
-        df = df[df.index.date <= target_date]
-        if df.empty:
-            return None
-
-        close = float(df["Close"].iloc[-1])
-        if len(df) >= 2:
-            prev_close = float(df["Close"].iloc[-2])
-            change = close - prev_close
-            change_pct = (change / prev_close) * 100
-        else:
-            change = 0.0
-            change_pct = 0.0
-
-        return {
-            "close": round(close, 2),
-            "change": round(change, 2),
-            "change_pct": round(change_pct, 2),
-        }
-    except Exception:
-        logger.exception("FDR 지수 조회 실패: %s @ %s", code, target_date)
+    """FDR로 target_date 기준 종가/등락 조회 (지수용 — round 2자리)."""
+    result = price_collector.fetch_close_with_change(code, target_date=target_date)
+    if result is None:
         return None
+    return {
+        "close": round(result["close"], 2),
+        "change": round(result["change"], 2),
+        "change_pct": round(result["change_pct"], 2),
+    }
 
 
 async def get_domestic_summary(target_date: date | None = None) -> dict[str, Any]:

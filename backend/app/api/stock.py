@@ -1,4 +1,5 @@
 """종목별 뉴스/공시 API"""
+from __future__ import annotations
 
 from fastapi import APIRouter
 
