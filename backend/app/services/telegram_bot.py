@@ -66,7 +66,10 @@ async def _handle_today() -> str:
         brief = await brief_service.get_brief_by_date(session, date.today())
     if not brief:
         return "오늘의 브리프가 아직 생성되지 않았습니다.\n07:00에 자동 생성됩니다."
-    return telegram_service.format_brief(brief)
+    # us_market 섹션 — fail-soft (실패 시 빈 문자열)
+    from app.services.us_market import get_us_market_section
+    us_section = await get_us_market_section()
+    return telegram_service.format_brief(brief, us_market_section=us_section)
 
 
 async def _handle_watch(args: str) -> str:

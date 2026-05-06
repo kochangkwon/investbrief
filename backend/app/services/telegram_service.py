@@ -90,8 +90,12 @@ def _format_market(data: dict[str, Any], title: str) -> str:
     return "\n".join(lines)
 
 
-def format_brief(brief: Any) -> str:
-    """DailyBrief → 텔레그램 메시지"""
+def format_brief(brief: Any, us_market_section: str = "") -> str:
+    """DailyBrief → 텔레그램 메시지.
+
+    us_market_section: us_market.get_us_market_section() 결과를 비동기로 미리 받아 전달.
+    실패/미사용 시 빈 문자열 → 섹션 자체가 노출되지 않음 (fail-soft).
+    """
     parts = []
 
     # 헤더
@@ -108,6 +112,11 @@ def format_brief(brief: Any) -> str:
     dm = _format_market(brief.domestic_market, "📊 국내 시장")
     if dm:
         parts.append(dm)
+        parts.append("")
+
+    # 미국 시장 동향 (us_market 패키지 — 해외지수 다음, 국내 시장 다음에 배치)
+    if us_market_section:
+        parts.append(us_market_section)
         parts.append("")
 
     # AI 뉴스 요약
@@ -136,7 +145,11 @@ def format_brief(brief: Any) -> str:
 
 async def send_brief(brief: Any) -> bool:
     """브리프를 텔레그램으로 발송"""
-    msg = format_brief(brief)
+    # us_market 섹션을 비동기로 fetch (실패 시 빈 문자열 — fail-soft)
+    from app.services.us_market import get_us_market_section
+    us_section = await get_us_market_section()
+
+    msg = format_brief(brief, us_market_section=us_section)
 
     # 텔레그램 메시지 4096자 제한
     if len(msg) > 4000:
