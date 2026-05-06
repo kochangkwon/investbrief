@@ -71,6 +71,22 @@ async def _generate_and_send():
         await telegram_service.send_text("⚠️ 모닝브리프 생성 중 오류가 발생했습니다.")
 
 
+async def _send_us_market():
+    """평일 미국 시장 동향 발송 (모닝브리프와 분리)"""
+    if not _is_weekday():
+        logger.info("스케줄: 주말 — 미국 시장 발송 스킵")
+        return
+    logger.info("스케줄: 미국 시장 동향 발송 시작")
+    try:
+        sent = await telegram_service.send_us_market_brief()
+        if sent:
+            logger.info("스케줄: 미국 시장 발송 완료")
+        else:
+            logger.info("스케줄: 미국 시장 데이터 없음 — 발송 스킵")
+    except Exception:
+        logger.exception("스케줄: 미국 시장 발송 실패")
+
+
 async def _midday_watchlist_check():
     """12:00 점심 — 관심종목 변동 알림"""
     if not _is_weekday():
@@ -206,6 +222,12 @@ def start_scheduler():
     hour = settings.brief_send_hour
 
     scheduler.add_job(_generate_and_send, "cron", hour=hour, minute=settings.brief_send_minute, id="morning_brief")
+    scheduler.add_job(
+        _send_us_market, "cron",
+        day_of_week="mon-fri",
+        hour=settings.us_market_send_hour, minute=settings.us_market_send_minute,
+        id="us_market_brief", replace_existing=True, misfire_grace_time=300,
+    )
     scheduler.add_job(_midday_watchlist_check, "cron", hour=12, minute=0, id="midday_check")
     scheduler.add_job(
         _daily_report, "cron", hour=16, minute=30,
@@ -247,8 +269,9 @@ def start_scheduler():
 
     scheduler.start()
     logger.info(
-        "스케줄러 시작: %02d:%02d 브리프 | 12:00 점심체크 | 16:30 일일리포트 | 평일 08:10 일일테마스캔 | 일 09:00 테마발굴 | 18:00 정리",
+        "스케줄러 시작: %02d:%02d 브리프 | 평일 %02d:%02d 미국시장 | 12:00 점심체크 | 16:30 일일리포트 | 평일 08:10 일일테마스캔 | 일 09:00 테마발굴 | 18:00 정리",
         hour, settings.brief_send_minute,
+        settings.us_market_send_hour, settings.us_market_send_minute,
     )
 
 

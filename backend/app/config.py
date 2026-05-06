@@ -32,5 +32,9 @@ class Settings(BaseSettings):
     ai_model: str = "claude-sonnet-4-20250514"
     ai_max_tokens: int = 1000
 
+    # US Market (모닝브리프와 분리 발송)
+    us_market_send_hour: int = 7
+    us_market_send_minute: int = 40
+
 
 settings = Settings()

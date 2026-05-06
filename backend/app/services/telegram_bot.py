@@ -21,6 +21,7 @@ TELEGRAM_API = "https://api.telegram.org/bot{token}"
 HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 
 /today — 오늘 브리프 다시 보기
+/us-market — 미국 시장 동향 즉시 조회
 /watch 종목명 — 관심종목 추가
 /unwatch 종목코드 — 관심종목 제거
 /list — 관심종목 목록
@@ -66,10 +67,16 @@ async def _handle_today() -> str:
         brief = await brief_service.get_brief_by_date(session, date.today())
     if not brief:
         return "오늘의 브리프가 아직 생성되지 않았습니다.\n07:00에 자동 생성됩니다."
-    # us_market 섹션 — fail-soft (실패 시 빈 문자열)
+    return telegram_service.format_brief(brief)
+
+
+async def _handle_us_market() -> str:
+    """/us-market — 미국 시장 동향 즉시 조회 (수동)"""
     from app.services.us_market import get_us_market_section
-    us_section = await get_us_market_section()
-    return telegram_service.format_brief(brief, us_market_section=us_section)
+    section = await get_us_market_section()
+    if not section:
+        return "미국 시장 데이터를 가져오지 못했습니다. (yfinance 일시 차단 가능)"
+    return section
 
 
 async def _handle_watch(args: str) -> str:
@@ -322,6 +329,7 @@ async def _handle_help(_: str) -> str:
 
 COMMAND_HANDLERS = {
     "/today": lambda args: _handle_today(),
+    "/us-market": lambda args: _handle_us_market(),
     "/watch": _handle_watch,
     "/unwatch": _handle_unwatch,
     "/list": lambda args: _handle_list(),
