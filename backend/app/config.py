@@ -36,5 +36,8 @@ class Settings(BaseSettings):
     us_market_send_hour: int = 7
     us_market_send_minute: int = 40
 
+    # Finnhub fallback (yfinance rate limit 시 자동 전환)
+    finnhub_api_key: str = ""
+
 
 settings = Settings()

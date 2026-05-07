@@ -260,11 +260,35 @@ def fetch_all() -> dict[str, Any]:
     - 빅네임 bulk: 1 + 시간외 7 = 8
     - 선물 bulk: 1 + 시간외 1 = 2
     - 합계: 약 12 req (기존 34 req에서 65% 감소)
+
+    Finnhub fallback (yfinance rate limit 시):
+    - ETF/빅네임만 자동 전환 (매크로/선물은 무료 plan 미지원)
+    - FINNHUB_API_KEY 미설정 시 fallback 비활성화
     """
+    from . import fetcher_finnhub
+
+    etf = fetch_etf_sectors()
+    big_names = fetch_big_names()
+    macro = fetch_macro_indicators()
+    sp500_futures = fetch_sp500_futures()
+
+    # Finnhub fallback — yfinance 카테고리별 빈 결과면 Finnhub 시도
+    if not etf:
+        fb_etf = fetcher_finnhub.fetch_etf_sectors_finnhub()
+        if fb_etf:
+            logger.info("[us_market] ETF fallback: yfinance 빈 결과 → Finnhub %d건", len(fb_etf))
+            etf = fb_etf
+
+    if not big_names:
+        fb_big = fetcher_finnhub.fetch_big_names_finnhub()
+        if fb_big:
+            logger.info("[us_market] 빅네임 fallback: yfinance 빈 결과 → Finnhub %d건", len(fb_big))
+            big_names = fb_big
+
     return {
-        "etf": fetch_etf_sectors(),
-        "big_names": fetch_big_names(),
-        "macro": fetch_macro_indicators(),
-        "sp500_futures": fetch_sp500_futures(),
+        "etf": etf,
+        "big_names": big_names,
+        "macro": macro,
+        "sp500_futures": sp500_futures,
         "fetched_at": datetime.now().isoformat(),
     }
