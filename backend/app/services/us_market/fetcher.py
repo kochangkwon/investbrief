@@ -2,7 +2,9 @@
 
 핵심 설계 원칙:
 - fail-soft: 한 종목/지표 실패해도 나머지는 진행
-- 시간외 거래 포함 (prepost=True)
+- **카테고리별 yf.download 일괄 호출** — Yahoo rate limit 회피
+  (ETF 5+매크로 4+빅네임 7+선물 1 = 17 req → 카테고리 4회 download + 시간외 8회 = 약 12 req)
+- 시간외(`fast_info`)는 빅네임/선물에만 필요 → 개별 호출 유지
 - 휴장일/주말 자동 처리 (period="5d"로 충분한 윈도우 확보)
 """
 from __future__ import annotations
@@ -11,6 +13,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+import pandas as pd
 import yfinance as yf
 
 from .mappings import BIG_NAMES, ETF_MAPPING, MACRO_INDICATORS, SP500_FUTURES
@@ -18,71 +21,139 @@ from .mappings import BIG_NAMES, ETF_MAPPING, MACRO_INDICATORS, SP500_FUTURES
 logger = logging.getLogger(__name__)
 
 
-def _fetch_single(ticker: str, prepost: bool = False) -> Optional[dict[str, Any]]:
-    """단일 ticker 정규장 + 시간외 데이터 수집."""
-    try:
-        t = yf.Ticker(ticker)
-        # 정규장 종가 (5일치 → 휴장 안전)
-        hist = t.history(period="5d", interval="1d", prepost=False)
-        if hist.empty:
-            logger.warning("[us_market] %s no regular history", ticker)
-            return None
+def _bulk_download(tickers: list[str]) -> Optional[pd.DataFrame]:
+    """여러 ticker history를 한 번의 HTTP 요청으로 수집.
 
-        regular_close = float(hist["Close"].iloc[-1])
-        regular_prev = (
-            float(hist["Close"].iloc[-2]) if len(hist) >= 2 else regular_close
+    yf.download(["A","B"], group_by='ticker') → MultiIndex columns DataFrame.
+    실패/빈 결과 → None.
+    """
+    if not tickers:
+        return None
+    try:
+        df = yf.download(
+            tickers,
+            period="5d",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            progress=False,
+            threads=False,
         )
-        regular_change_pct = (
+    except Exception as e:
+        logger.error("[us_market] bulk download failed (%s): %s", tickers, e)
+        return None
+    if df is None or df.empty:
+        logger.warning("[us_market] bulk download empty (%s)", tickers)
+        return None
+    return df
+
+
+def _extract_history_metrics(
+    df: pd.DataFrame, ticker: str, single_ticker: bool = False
+) -> Optional[dict[str, float]]:
+    """multi-ticker DataFrame에서 단일 ticker의 종가/변동률 추출.
+
+    Args:
+        df: yf.download 결과 (MultiIndex columns 또는 단일 ticker시 평면)
+        ticker: 추출할 ticker 코드
+        single_ticker: 호출 시 ticker 1개였으면 True (column 구조 평면)
+
+    Returns:
+        {"regular_close": float, "regular_change_pct": float} or None
+    """
+    try:
+        if single_ticker:
+            # ticker 1개 download — columns: Open/High/Low/Close/Volume
+            close_series = df["Close"].dropna()
+        else:
+            # MultiIndex: df[ticker] → ticker별 sub-frame
+            if isinstance(df.columns, pd.MultiIndex):
+                if ticker not in df.columns.get_level_values(0):
+                    return None
+                close_series = df[ticker]["Close"].dropna()
+            else:
+                # group_by='ticker'인데 단일 ticker로 평면 반환된 케이스 (yfinance quirk)
+                close_series = df["Close"].dropna()
+    except Exception as e:
+        logger.warning("[us_market] %s extract failed: %s", ticker, e)
+        return None
+
+    if close_series.empty:
+        return None
+
+    try:
+        regular_close = float(close_series.iloc[-1])
+        regular_prev = (
+            float(close_series.iloc[-2]) if len(close_series) >= 2 else regular_close
+        )
+        change_pct = (
             (regular_close - regular_prev) / regular_prev * 100 if regular_prev else 0.0
         )
-
-        # 시간외/프리마켓 (선택적)
-        prepost_change_pct: Optional[float] = None
-        prepost_price: Optional[float] = None
-        if prepost:
-            try:
-                fast = t.fast_info
-                # yfinance 버전에 따라 dict-like / attribute 접근 모두 지원
-                last_price = None
-                try:
-                    last_price = fast.get("last_price")  # type: ignore[union-attr]
-                except Exception:
-                    last_price = getattr(fast, "last_price", None)
-                if last_price and last_price != regular_close:
-                    prepost_price = float(last_price)
-                    prepost_change_pct = (
-                        (prepost_price - regular_close) / regular_close * 100
-                    )
-            except Exception as e:
-                logger.debug("[us_market] %s prepost fetch skip: %s", ticker, e)
-
         return {
-            "ticker": ticker,
             "regular_close": regular_close,
-            "regular_change_pct": round(regular_change_pct, 2),
-            "prepost_price": prepost_price,
-            "prepost_change_pct": (
-                round(prepost_change_pct, 2)
-                if prepost_change_pct is not None
-                else None
-            ),
-            "fetched_at": datetime.now().isoformat(),
+            "regular_change_pct": round(change_pct, 2),
         }
     except Exception as e:
-        logger.error("[us_market] %s fetch failed: %s", ticker, e)
+        logger.warning("[us_market] %s metrics calc failed: %s", ticker, e)
         return None
 
 
+def _fetch_prepost_price(ticker: str) -> Optional[float]:
+    """단일 ticker의 시간외/실시간 가격 (yf.Ticker.fast_info).
+
+    빅네임/선물에만 호출 — ETF/매크로는 시간외 무의미.
+    """
+    try:
+        t = yf.Ticker(ticker)
+        fast = t.fast_info
+        last_price = None
+        try:
+            last_price = fast.get("last_price")  # type: ignore[union-attr]
+        except Exception:
+            last_price = getattr(fast, "last_price", None)
+        return float(last_price) if last_price else None
+    except Exception as e:
+        logger.debug("[us_market] %s prepost fetch skip: %s", ticker, e)
+        return None
+
+
+def _build_record(
+    ticker: str,
+    metrics: dict[str, float],
+    prepost_price: Optional[float] = None,
+) -> dict[str, Any]:
+    """history 메트릭 + 시간외 가격 → 표준 record dict."""
+    regular_close = metrics["regular_close"]
+    prepost_change_pct: Optional[float] = None
+    if prepost_price is not None and prepost_price != regular_close and regular_close:
+        prepost_change_pct = round(
+            (prepost_price - regular_close) / regular_close * 100, 2
+        )
+    return {
+        "ticker": ticker,
+        "regular_close": regular_close,
+        "regular_change_pct": metrics["regular_change_pct"],
+        "prepost_price": prepost_price,
+        "prepost_change_pct": prepost_change_pct,
+        "fetched_at": datetime.now().isoformat(),
+    }
+
+
 def fetch_etf_sectors() -> list[dict[str, Any]]:
-    """ETF 섹터 데이터 수집."""
+    """ETF 섹터 데이터 수집 (시간외 미사용)."""
+    tickers = list(ETF_MAPPING.keys())
+    df = _bulk_download(tickers)
+    if df is None:
+        return []
+
     results: list[dict[str, Any]] = []
-    for ticker in ETF_MAPPING.keys():
-        data = _fetch_single(ticker, prepost=False)
-        if data is None:
+    for ticker in tickers:
+        metrics = _extract_history_metrics(df, ticker, single_ticker=len(tickers) == 1)
+        if metrics is None:
             continue
         mapping = ETF_MAPPING[ticker]
         results.append({
-            **data,
+            **_build_record(ticker, metrics),
             "name": mapping["name"],
             "category": mapping["category"],
             "kr_stocks": mapping["kr_stocks"],
@@ -95,21 +166,29 @@ def fetch_etf_sectors() -> list[dict[str, Any]]:
 
 
 def fetch_big_names() -> list[dict[str, Any]]:
-    """빅네임 종목 데이터 수집 (시간외 포함)."""
+    """빅네임 종목 데이터 수집 (history 일괄 + 시간외 개별)."""
+    tickers = list(BIG_NAMES.keys())
+    df = _bulk_download(tickers)
+    if df is None:
+        return []
+
     results: list[dict[str, Any]] = []
-    for ticker in BIG_NAMES.keys():
-        data = _fetch_single(ticker, prepost=True)
-        if data is None:
+    for ticker in tickers:
+        metrics = _extract_history_metrics(df, ticker, single_ticker=len(tickers) == 1)
+        if metrics is None:
             continue
+        prepost_price = _fetch_prepost_price(ticker)
+        record = _build_record(ticker, metrics, prepost_price=prepost_price)
+
         mapping = BIG_NAMES[ticker]
-        regular_abs = abs(data["regular_change_pct"])
-        prepost_abs = abs(data["prepost_change_pct"] or 0)
+        regular_abs = abs(record["regular_change_pct"])
+        prepost_abs = abs(record["prepost_change_pct"] or 0)
         is_alert = (
             regular_abs >= mapping["alert_threshold"]
             or prepost_abs >= mapping["alert_threshold"]
         )
         results.append({
-            **data,
+            **record,
             "name": mapping["name"],
             "kr_stocks": mapping["kr_stocks"],
             "relation": mapping.get("relation", ""),
@@ -123,14 +202,20 @@ def fetch_big_names() -> list[dict[str, Any]]:
 
 
 def fetch_macro_indicators() -> list[dict[str, Any]]:
-    """매크로 지표 수집."""
+    """매크로 지표 수집 (시간외 미사용)."""
+    tickers = list(MACRO_INDICATORS.keys())
+    df = _bulk_download(tickers)
+    if df is None:
+        return []
+
     results: list[dict[str, Any]] = []
-    for ticker, mapping in MACRO_INDICATORS.items():
-        data = _fetch_single(ticker, prepost=False)
-        if data is None:
+    for ticker in tickers:
+        metrics = _extract_history_metrics(df, ticker, single_ticker=len(tickers) == 1)
+        if metrics is None:
             continue
+        mapping = MACRO_INDICATORS[ticker]
         results.append({
-            **data,
+            **_build_record(ticker, metrics),
             "name": mapping["name"],
             "category": mapping["category"],
             "implication_up": mapping["implication_up"],
@@ -146,14 +231,19 @@ def fetch_macro_indicators() -> list[dict[str, Any]]:
 
 
 def fetch_sp500_futures() -> Optional[dict[str, Any]]:
-    """S&P500 선물 (한국 갭 예측 시그널)."""
+    """S&P500 선물 (한국 갭 예측 시그널). 단일 ticker라 download도 1 req."""
     ticker = "ES=F"
-    data = _fetch_single(ticker, prepost=True)
-    if data is None:
+    df = _bulk_download([ticker])
+    if df is None:
         return None
+    metrics = _extract_history_metrics(df, ticker, single_ticker=True)
+    if metrics is None:
+        return None
+    prepost_price = _fetch_prepost_price(ticker)
+    record = _build_record(ticker, metrics, prepost_price=prepost_price)
     mapping = SP500_FUTURES[ticker]
     return {
-        **data,
+        **record,
         "name": mapping["name"],
         "category": mapping["category"],
         "implication": mapping["implication"],
@@ -162,7 +252,15 @@ def fetch_sp500_futures() -> Optional[dict[str, Any]]:
 
 
 def fetch_all() -> dict[str, Any]:
-    """모든 데이터 한 번에 수집 (모닝브리프에서 호출)."""
+    """모든 데이터 한 번에 수집 (모닝브리프에서 호출).
+
+    HTTP 호출 수:
+    - ETF bulk: 1
+    - 매크로 bulk: 1
+    - 빅네임 bulk: 1 + 시간외 7 = 8
+    - 선물 bulk: 1 + 시간외 1 = 2
+    - 합계: 약 12 req (기존 34 req에서 65% 감소)
+    """
     return {
         "etf": fetch_etf_sectors(),
         "big_names": fetch_big_names(),

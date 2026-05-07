@@ -20,17 +20,31 @@ from .formatter import format_full_section
 logger = logging.getLogger(__name__)
 
 # 메모리 캐시 (단일 worker 가정 — uvicorn --workers 1)
+# 정상 결과: 180분 TTL — 같은 IP 반복 호출 차단 + 아침 1회 발송 + 점심 /us-market 수동 조회를
+#            한 번의 fetch로 커버.
+# 빈 결과(rate limit 등): 30분 TTL — 차단 중 재호출로 카운터가 reset되지 않게 막음.
 _cache: dict[str, Any] = {
     "data": None,
     "expires_at": None,
 }
-_CACHE_TTL_MINUTES = 60
+_CACHE_TTL_MINUTES = 180
+_EMPTY_CACHE_TTL_MINUTES = 30
 
 
 def _is_cache_valid() -> bool:
     if _cache["data"] is None or _cache["expires_at"] is None:
         return False
     return datetime.now() < _cache["expires_at"]
+
+
+def _is_data_empty(data: dict[str, Any]) -> bool:
+    """모든 카테고리가 비었는지 — rate limit 등으로 fetch 전부 실패한 상태."""
+    return (
+        not data.get("etf")
+        and not data.get("big_names")
+        and not data.get("macro")
+        and data.get("sp500_futures") is None
+    )
 
 
 async def get_us_market_data(use_cache: bool = True) -> dict[str, Any]:
@@ -40,12 +54,19 @@ async def get_us_market_data(use_cache: bool = True) -> dict[str, Any]:
 
     try:
         data = await asyncio.to_thread(fetch_all)
-        _cache["data"] = data
-        _cache["expires_at"] = datetime.now() + timedelta(minutes=_CACHE_TTL_MINUTES)
-        return data
     except Exception:
         logger.exception("[us_market] fetch_all failed")
-        return {"etf": [], "big_names": [], "macro": [], "sp500_futures": None}
+        data = {"etf": [], "big_names": [], "macro": [], "sp500_futures": None}
+
+    is_empty = _is_data_empty(data)
+    ttl = _EMPTY_CACHE_TTL_MINUTES if is_empty else _CACHE_TTL_MINUTES
+    _cache["data"] = data
+    _cache["expires_at"] = datetime.now() + timedelta(minutes=ttl)
+    if is_empty:
+        logger.info(
+            "[us_market] 빈 결과 캐시 — %d분간 재호출 차단 (rate limit 추정)", ttl,
+        )
+    return data
 
 
 async def get_us_market_section(use_cache: bool = True) -> str:
