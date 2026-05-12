@@ -158,7 +158,7 @@ async def _daily_theme_scan():
 
 
 async def _weekly_theme_discovery():
-    """주 1회 아카이브 기반 테마 발굴 (매주 일요일 09:00)"""
+    """주 1회 아카이브 기반 테마 발굴 (매주 월요일 07:45)"""
     logger.info("주간 테마 발굴 시작")
     try:
         await theme_discovery_service.send_weekly_theme_report()
@@ -243,8 +243,10 @@ def start_scheduler():
     )
     scheduler.add_job(
         _weekly_theme_discovery, "cron",
-        day_of_week="sun", hour=9, minute=0,
+        day_of_week="mon", hour=7, minute=45,
         id="weekly_theme_discovery",
+        replace_existing=True,
+        misfire_grace_time=3600,  # 서버 부팅 지연 대비 (일요일 서버 중지 환경)
     )
     scheduler.add_job(_cleanup_old_data, "cron", hour=18, minute=0, id="cleanup")
 

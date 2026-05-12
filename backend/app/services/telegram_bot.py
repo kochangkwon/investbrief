@@ -41,7 +41,7 @@ HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 /theme-discover [일수] — AI가 부상 테마 자동 발굴 (기본 30일)
 /theme-trending — 언급 빈도 TOP 10 종목
 
-매주 일요일 09:00 자동 발굴 리포트 전송
+매주 월요일 07:45 자동 발굴 리포트 전송
 
 /help — 도움말"""
 
