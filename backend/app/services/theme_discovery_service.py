@@ -261,7 +261,7 @@ async def discover_themes(days: int = 30) -> dict[str, Any]:
 
     for brief in archives:
         date_str = brief.date.isoformat()
-        for news in (brief.news_raw or [])[:10]:
+        for news in (brief.news_raw or [])[:20]:
             title = news.get("title", "")
             if title:
                 news_titles.append(f"[{date_str}] {title}")
@@ -272,21 +272,41 @@ async def discover_themes(days: int = 30) -> dict[str, Any]:
         if brief.news_summary:
             ai_summaries.append(f"[{date_str}] {brief.news_summary[:200]}")
 
+    events_text = ""
+    try:
+        from app.services import event_calendar_service
+        events = await event_calendar_service.get_upcoming_events(days=30)
+        if events:
+            events_lines = []
+            for e in events[:15]:
+                events_lines.append(
+                    f"[{e.get('date', '?')}] {e.get('title', '?')} "
+                    f"({e.get('category', '?')})"
+                )
+            events_text = "\n".join(events_lines)
+    except ImportError:
+        pass
+    except Exception:
+        logger.exception("이벤트 캘린더 조회 실패 (선택사항, 무시)")
+
     prompt = _build_theme_discovery_prompt(
-        days, news_titles, disclosure_titles, ai_summaries
+        days, news_titles, disclosure_titles, ai_summaries,
+        events_text=events_text,
     )
 
     try:
         client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         response = await client.messages.create(
             model=settings.ai_model,
-            max_tokens=2000,
+            max_tokens=3500,
             messages=[{"role": "user", "content": prompt}],
         )
         analysis = response.content[0].text
         logger.info(
-            "테마 발굴 완료 (%d tokens, %d days)",
-            response.usage.output_tokens, days,
+            "테마 발굴 v2.1: 입력 %d 뉴스 + %d 공시 + %d 요약 + %d 이벤트 → 출력 %d 토큰",
+            len(news_titles), len(disclosure_titles), len(ai_summaries),
+            len(events_text.split("\n")) if events_text else 0,
+            response.usage.output_tokens,
         )
     except anthropic.RateLimitError:
         return {"error": "Claude API 호출 한도 초과 — 잠시 후 재시도해주세요."}
@@ -308,17 +328,32 @@ def _build_theme_discovery_prompt(
     news_titles: list[str],
     disclosure_titles: list[str],
     ai_summaries: list[str],
+    events_text: str = "",
 ) -> str:
-    """테마 발굴용 Claude 프롬프트 구성"""
-    news_section = "\n".join(news_titles[:300])
+    """테마 발굴용 Claude 프롬프트 (v2.1 — 9~12개 항목 분석가 리포트).
+
+    events_text가 제공되면 카탈리스트 항목에 활용.
+    없으면 카탈리스트 항목은 뉴스/공시에서만 추출 시도.
+    """
+    news_section = "\n".join(news_titles[:600])
     disclosure_section = "\n".join(disclosure_titles[:100])
     summary_section = "\n\n".join(ai_summaries[:30])
 
+    events_block = ""
+    if events_text and events_text.strip():
+        events_block = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 향후 30일 예정 이벤트 (P1-4 캘린더):
+{events_text}
+
+"""
+
     return f"""당신은 한국 주식 시장 테마 분석 전문가입니다.
 
-다음은 최근 {days}일간 한국 증시 관련 뉴스 제목, DART 공시 제목, 그리고 일일 AI 요약입니다.
+다음은 최근 {days}일간 한국 증시 관련 데이터입니다.
 
-이 데이터에서 **부상 중인 투자 테마**와 **수혜 종목**을 발굴해주세요.
+이 데이터에서 **부상 중인 투자 테마를 3~4개** 발굴하고,
+**깊이 우선** 원칙으로 분석가 리포트 수준의 분석을 제공하세요.
+(테마 수보다 분석 깊이가 더 중요)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📰 뉴스 제목 (최근 {days}일):
@@ -332,35 +367,55 @@ def _build_theme_discovery_prompt(
 🤖 일일 AI 요약:
 {summary_section}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{events_block}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 다음 형식으로 답변하세요:
 
-## 📈 부상 중인 테마 (3~5개)
-
-각 테마에 대해:
+## 📈 부상 중인 테마 (3~4개)
 
 ### 1. [테마명]
+
+**필수 항목** (모든 테마에 작성):
 - **부상 근거**: 왜 이 테마가 주목받는지 (2~3줄)
-- **핵심 키워드**: 해당 테마를 관통하는 키워드 3~5개
-- **수혜 종목**: 뉴스/공시에 등장한 관련 종목 (종목명만 나열, 최대 5개)
+- **핵심 키워드**: 해당 테마를 관통하는 키워드 3~5개 (쉼표 구분)
+- **핵심 드라이버**: 정책 / 기술 / 수요 중 무엇이 추진력인지 (1줄)
+- **밸류체인 위치**: 상류(소재/장비) / 중류(제조) / 하류(서비스/유통) 중 한국 기업이 강한 위치
+- **라이프 스테이지**: 초기 부상 / 가속 성장 / 성숙 / 조정 중 하나 + 1줄 근거
+- **수혜 종목**: 뉴스/공시에 명시적으로 등장한 종목 (종목명만, 최대 5개)
+- **깨질 시나리오**: 이 테마가 끝날 수 있는 리스크 요인 (1~2줄)
 - **모멘텀 강도**: 🔥🔥🔥 (강함) / 🔥🔥 (중간) / 🔥 (약함)
 
-## ⚠️ 주의 섹터
+**선택 항목** (입력 데이터에서 추출 가능한 경우만 작성, 불확실하면 생략):
+- **시장 규모 (TAM)**: 추정 시장 규모 + 연 성장률(CAGR)
+- **한국 노출도**: 글로벌 시장 대비 한국 기업 점유율 또는 매출 비중
+- **과거 유사 사례**: 비슷한 흐름이 있었던 과거 테마 (예: "2017 메모리 슈퍼사이클")
+- **다음 카탈리스트**: 7~30일 내 예정 일정 (어닝/정책/컨퍼런스 등)
 
-단기적으로 하방 압력을 받고 있는 섹터가 있다면 1~2개만 간단히.
+## ⚠️ 주의 섹터 (1~2개)
+
+각 항목 형식:
+- **섹터명**: 하방 압력 이유 (1줄) + 깨질/지속 시나리오 (1줄)
 
 ## 💡 한 줄 인사이트
 
 이 {days}일간 시장을 관통하는 핵심 스토리를 한 줄로.
 
+## 🔄 테마 간 관계 (선택사항)
+
+상호 보강 또는 반비례 관계인 테마 쌍이 있으면 1~2쌍만:
+- "테마 A ↔ 테마 B: 관계 설명 (1줄)"
+
 ---
 
 **중요 규칙:**
-- 뉴스에 **실제로 등장한** 종목/키워드만 사용. 추측 금지.
-- 이미 누구나 아는 테마(예: "반도체 수혜")는 제외. **새롭게 부상 중인** 것 중심.
-- 수혜 종목은 뉴스 제목이나 공시에 명시적으로 나온 것만 포함.
-- 서론/결론 없이 위 형식대로 바로 작성."""
+
+1. **양보다 깊이**: 테마는 3~4개로 충분. 5개는 깊이가 떨어지므로 지양.
+2. **선택 항목은 진짜 있을 때만**: 추측하지 말고, 입력 데이터에서 명확한 근거가 있을 때만 작성. 불확실하면 **항목 자체를 생략**. "데이터 부족" 같은 표기 불필요.
+3. **다음 카탈리스트**: 위 "📅 향후 30일 예정 이벤트" 섹션이 제공되면 그 일정을 우선 활용. 없으면 뉴스/공시에서 추출. 둘 다 없으면 항목 생략.
+4. **수혜 종목**: 뉴스에 **실제로 등장한** 종목만. 한 종목은 한 테마에만 배정 권장 (가장 강한 매칭).
+5. **이미 누구나 아는 테마**(예: "반도체 수혜")는 제외. **새롭게 부상 중인** 것 중심.
+6. **라이프 스테이지**: 입력 데이터의 언급 빈도, 가격 동향, 정책 단계 등 종합 판단. 일관성을 위해 보수적으로(과대 단계 평가 회피).
+7. 서론/결론 없이 위 형식대로 바로 작성."""
 
 
 # ── AI 응답 파싱 + Theme DB 자동 등록 (권고 1) ─────────────────────────
