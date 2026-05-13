@@ -33,6 +33,9 @@ STOCK_NAME_PATTERN = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9&]{1,14})")
 # 윈도우가 지나면 다시 검증 → 폭등 후 정상화된 종목을 매수 적기에 재검출.
 DETECTION_WINDOW_DAYS = 14
 
+# 본문 추출 도입 시 candidate 폭증 방지 (Claude 검증 비용 통제). 헤드라인 매칭 우선.
+MAX_CANDIDATES_PER_THEME = 30
+
 # ── Claude 검증 레이어 ─────────────────────────────────────────────────
 # 공통 호출/파싱은 ai_verifier.verify_with_claude로 위임. 여기서는 프롬프트만 보유.
 
@@ -222,7 +225,9 @@ async def _scan_single_theme(
     detected_stocks: dict[str, dict[str, Any]] = {}
     for news in all_news:
         title = news.get("title", "")
-        candidates = set(STOCK_NAME_PATTERN.findall(title))
+        description = news.get("description", "")
+        combined_text = f"{title} {description[:200]}"
+        candidates = set(STOCK_NAME_PATTERN.findall(combined_text))
         for candidate in candidates:
             if len(candidate) < 2:
                 continue
@@ -251,6 +256,27 @@ async def _scan_single_theme(
 
     if not detected_stocks:
         return 0
+
+    # 본문 추출로 candidate 폭증 시 헤드라인 매칭 우선 30개 제한
+    if len(detected_stocks) > MAX_CANDIDATES_PER_THEME:
+        headline_first = {
+            k: v for k, v in detected_stocks.items()
+            if v["stock_name"] in v.get("headline", "")
+        }
+        body_only = {
+            k: v for k, v in detected_stocks.items()
+            if k not in headline_first
+        }
+        limited: dict[str, dict[str, Any]] = dict(headline_first)
+        for k, v in body_only.items():
+            if len(limited) >= MAX_CANDIDATES_PER_THEME:
+                break
+            limited[k] = v
+        detected_stocks = limited
+        logger.info(
+            "테마 %s: candidate 초과 → %d개로 제한",
+            theme.name, MAX_CANDIDATES_PER_THEME,
+        )
 
     # 중복 검증 윈도우 — DETECTION_WINDOW_DAYS 이내 검증한 종목만 SKIP.
     # 그 이전 레코드는 무시 → 폭등 후 RSI 정상화된 종목을 매수 적기에 재검증.

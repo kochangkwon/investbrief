@@ -114,7 +114,9 @@ async def _analyze_stock_frequency_with_titles(
         date_str = brief.date.isoformat()
         for news in news_raw:
             title = news.get("title", "")
-            candidates = set(STOCK_NAME_PATTERN.findall(title))
+            description = news.get("description", "")
+            combined_text = f"{title} {description[:200]}"
+            candidates = set(STOCK_NAME_PATTERN.findall(combined_text))
             for candidate in candidates:
                 if candidate in STOPWORDS or len(candidate) < 2:
                     continue

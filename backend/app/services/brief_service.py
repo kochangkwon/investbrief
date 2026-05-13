@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors import dart_collector, market_collector, news_collector, stock_collector
 from app.models.brief import DailyBrief
-from app.services import ai_summarizer, watchlist_service
+from app.services import (
+    ai_summarizer,
+    investor_flow_service,
+    market_risk_simple,
+    watchlist_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +28,15 @@ async def _safe_collect(name: str, coro, default=None):
     except Exception:
         logger.exception("수집 실패 [%s] — 기본값 사용", name)
         return default if default is not None else {}
+
+
+async def _diagnose_market_risk(global_market: dict[str, Any]) -> dict[str, Any]:
+    """P0-5 위험 진단 헬퍼 — 외인 5일 흐름 함께 조회."""
+    flow_history = await market_risk_simple.get_investor_flow_history(days=5)
+    return await market_risk_simple.diagnose_simple(
+        global_market=global_market,
+        investor_flow_history=flow_history,
+    )
 
 
 async def generate_daily_brief(
@@ -51,9 +65,32 @@ async def generate_daily_brief(
         ),
     )
 
-    # 2. AI 요약
+    # 2. 수급 데이터 (P0-2)
+    investor_flow = await _safe_collect(
+        "investor_flow",
+        investor_flow_service.get_today_flow_summary(target_date=target_date),
+        {},
+    )
+
+    # 3. 시장 위험 모드 진단 (P0-5)
+    market_risk = await _safe_collect(
+        "market_risk",
+        _diagnose_market_risk(global_market),
+        {"level": "정상", "factors": [], "score": 0},
+    )
+
+    # 4. AI 요약 (P0-1: 전문가 5섹션 브리프, P0-5 위험 모드 주입)
     news_summary = await _safe_collect(
-        "ai_summary", ai_summarizer.summarize_news(news_items), "AI 요약을 생성하지 못했습니다."
+        "ai_summary",
+        ai_summarizer.generate_expert_brief(
+            global_market=global_market,
+            domestic_market=domestic_market,
+            investor_flow=investor_flow,
+            news_items=news_items,
+            disclosure_items=dart_items,
+            market_risk=market_risk,
+        ),
+        "AI 요약을 생성하지 못했습니다.",
     )
 
     # 3. 관심종목 체크
@@ -70,6 +107,8 @@ async def generate_daily_brief(
         news_raw=news_items,
         disclosures=dart_items,
         watchlist_check=watchlist_data,
+        investor_flow=investor_flow,
+        market_risk=market_risk,
         created_at=datetime.now(),
     )
 

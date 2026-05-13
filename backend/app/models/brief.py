@@ -18,6 +18,8 @@ class DailyBrief(Base):
     news_raw: Mapped[list] = mapped_column(JSON)
     disclosures: Mapped[list] = mapped_column(JSON)
     watchlist_check: Mapped[list] = mapped_column(JSON)
+    investor_flow: Mapped[dict] = mapped_column(JSON, default=dict, nullable=True)
+    market_risk: Mapped[dict] = mapped_column(JSON, default=dict, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=datetime.datetime.now
     )

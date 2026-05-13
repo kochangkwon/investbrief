@@ -81,6 +81,20 @@ async def get_today_disclosures(target_date: date | None = None) -> list[dict[st
                 "rcept_dt": item.get("rcept_dt", ""),
                 "importance": _classify_importance(item.get("report_nm", "")),
             })
+
+        # P0-4: corp_code 자연스러운 캐시 누적 (운영하며 자동 확장)
+        try:
+            from app.services import fundamental_simple_service
+            for item in data.get("list", []):
+                stock_code = item.get("stock_code", "")
+                corp_code = item.get("corp_code", "")
+                corp_name = item.get("corp_name", "")
+                if stock_code and corp_code and len(stock_code) == 6:
+                    await fundamental_simple_service.update_corp_map(
+                        stock_code, corp_code, corp_name,
+                    )
+        except Exception:
+            logger.exception("corp_code 캐시 업데이트 실패 (무시)")
     except Exception:
         logger.exception("DART 공시 수집 실패")
 
