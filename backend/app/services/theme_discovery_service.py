@@ -248,8 +248,12 @@ async def _verify_top_stocks_attention(
 
 async def discover_themes(days: int = 30) -> dict[str, Any]:
     """최근 N일 아카이브를 Claude API에 보내 테마 자동 발굴"""
+    from app.models.theme import Theme  # 지연 import (순환 방지)
+
     async with async_session() as session:
         archives = await _get_recent_archives(session, days)
+        existing_result = await session.execute(select(Theme.name))
+        existing_themes = list(existing_result.scalars().all())
 
     if not archives:
         return {"error": "분석할 아카이브가 없습니다."}
@@ -294,6 +298,7 @@ async def discover_themes(days: int = 30) -> dict[str, Any]:
     prompt = _build_theme_discovery_prompt(
         days, news_titles, disclosure_titles, ai_summaries,
         events_text=events_text,
+        existing_themes=existing_themes,
     )
 
     try:
@@ -331,15 +336,26 @@ def _build_theme_discovery_prompt(
     disclosure_titles: list[str],
     ai_summaries: list[str],
     events_text: str = "",
+    existing_themes: Optional[list[str]] = None,
 ) -> str:
     """테마 발굴용 Claude 프롬프트 (v2.1 — 9~12개 항목 분석가 리포트).
 
     events_text가 제공되면 카탈리스트 항목에 활용.
     없으면 카탈리스트 항목은 뉴스/공시에서만 추출 시도.
+    existing_themes가 제공되면 의미상 중복 테마 재생성을 회피하도록 지시.
     """
     news_section = "\n".join(news_titles[:600])
     disclosure_section = "\n".join(disclosure_titles[:100])
     summary_section = "\n\n".join(ai_summaries[:30])
+
+    existing_block = ""
+    if existing_themes:
+        existing_list = "\n".join(f"- {n}" for n in existing_themes)
+        existing_block = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 이미 등록된 테마 (중복 발굴 금지 대상):
+{existing_list}
+
+"""
 
     events_block = ""
     if events_text and events_text.strip():
@@ -369,7 +385,7 @@ def _build_theme_discovery_prompt(
 🤖 일일 AI 요약:
 {summary_section}
 
-{events_block}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{events_block}{existing_block}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 다음 형식으로 답변하세요:
 
@@ -416,6 +432,7 @@ def _build_theme_discovery_prompt(
 3. **다음 카탈리스트**: 위 "📅 향후 30일 예정 이벤트" 섹션이 제공되면 그 일정을 우선 활용. 없으면 뉴스/공시에서 추출. 둘 다 없으면 항목 생략.
 4. **수혜 종목**: 뉴스에 **실제로 등장한** 종목만. 한 종목은 한 테마에만 배정 권장 (가장 강한 매칭).
 5. **이미 누구나 아는 테마**(예: "반도체 수혜")는 제외. **새롭게 부상 중인** 것 중심.
+5-1. **중복 회피**: 위 "📚 이미 등록된 테마" 목록과 **의미·대상이 겹치는 테마는 발굴하지 말 것**. 이름 표현이 달라도(예: "피지컬AI 로봇 상용화" vs "물리적 AI 로봇 혁명") 같은 대상을 가리키면 중복으로 간주하고 제외. 기존 테마에 없는 **진짜 새로운** 흐름만 제시.
 6. **라이프 스테이지**: 입력 데이터의 언급 빈도, 가격 동향, 정책 단계 등 종합 판단. 일관성을 위해 보수적으로(과대 단계 평가 회피).
 7. 서론/결론 없이 위 형식대로 바로 작성."""
 
