@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any, Optional
 
 import anthropic
@@ -16,26 +16,12 @@ from app.config import settings
 from app.database import async_session
 from app.models.brief import DailyBrief
 from app.services import ai_verifier, telegram_service
+from app.services.stock_name_rules import GROUP_PREFIX_NAMES, STOPWORDS
+from app.utils.timezone import now_kst, today_kst
 
 logger = logging.getLogger(__name__)
 
 STOCK_NAME_PATTERN = re.compile(r"([가-힣][가-힣A-Za-z0-9]{1,14})")
-
-STOPWORDS = {
-    "한국", "미국", "중국", "일본", "유럽", "코스피", "코스닥",
-    "증시", "시장", "투자", "기업", "정부", "대통령", "장관", "위원회",
-    "분석", "전망", "예상", "발표", "공시", "뉴스", "기사", "매출", "실적",
-    "영업이익", "순이익", "주가", "주식", "종목", "거래", "상승", "하락",
-    "오늘", "내일", "어제", "금주", "이번", "지난", "최근",
-}
-
-# 한국 주요 그룹명 — 단독 등장 시 지주사로 잘못 매핑되므로 차단
-# (그룹명 + 후속 단어 결합한 종목명은 정상 매칭됨, 예: "한화에어로스페이스")
-GROUP_PREFIX_NAMES = {
-    "삼성", "LG", "현대", "SK", "롯데", "한화", "한국", "GS",
-    "CJ", "두산", "포스코", "효성", "한진", "신세계", "농심",
-    "오리온", "동원", "코오롱", "대상",
-}
 
 
 # ── 시장 주목 검증 게이트 (권고 3) ────────────────────────────────────────
@@ -76,7 +62,7 @@ async def _get_recent_archives(
     session: AsyncSession, days: int
 ) -> list[DailyBrief]:
     """최근 N일 브리프 아카이브 조회"""
-    cutoff = date.today() - timedelta(days=days)
+    cutoff = today_kst() - timedelta(days=days)
     result = await session.execute(
         select(DailyBrief)
         .where(DailyBrief.date >= cutoff)
@@ -494,60 +480,11 @@ def _extract_themes_from_analysis(analysis: str) -> list[dict[str, Any]]:
     return themes
 
 
-async def _auto_register_themes(themes_data: list[dict[str, Any]]) -> tuple[int, int]:
-    """추출된 테마를 Theme DB에 자동 등록.
+async def suggest_themes_from_analysis(analysis: str) -> str:
+    """AI 분석 결과에서 테마 추출 + 등록 명령어 제안 메시지 생성.
 
-    중복 처리:
-    - 동일 name 이미 존재 → 스킵 (사용자 등록 보존)
-    - 신규 → Theme(enabled=True)로 추가
-
-    Returns: (신규_등록_수, 기존_스킵_수)
-    """
-    from app.models.theme import Theme  # 지연 import (순환 방지)
-
-    if not themes_data:
-        return 0, 0
-
-    new_count = 0
-    skip_count = 0
-
-    async with async_session() as session:
-        existing_result = await session.execute(select(Theme.name))
-        existing_names = set(existing_result.scalars().all())
-
-        for theme in themes_data:
-            name = theme["name"]
-            keywords = theme["keywords"]
-
-            if name in existing_names:
-                skip_count += 1
-                logger.info("테마 자동등록 스킵 (이미 존재): %s", name)
-                continue
-
-            new_theme = Theme(
-                name=name,
-                keywords=",".join(keywords),
-                enabled=True,
-            )
-            session.add(new_theme)
-            new_count += 1
-            logger.info(
-                "테마 자동등록: %s (키워드 %d개)",
-                name, len(keywords),
-            )
-
-        try:
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            logger.exception("테마 자동등록 commit 실패")
-            return 0, skip_count
-
-    return new_count, skip_count
-
-
-async def auto_register_from_analysis(analysis: str) -> str:
-    """AI 분석 결과에서 테마 추출 + 자동 등록 + 결과 메시지 생성.
+    자동 등록하지 않는다. 사용자가 복사-전송할 수 있는 /theme-add 명령어
+    목록을 만들어 승인 게이트를 둔다 (테마 무한 증식 방지).
 
     수동 (/theme-discover)와 자동 (send_weekly_theme_report) 양쪽에서 호출.
 
@@ -555,29 +492,45 @@ async def auto_register_from_analysis(analysis: str) -> str:
         analysis: discover_themes()의 result["analysis"] 텍스트
 
     Returns:
-        결과 요약 메시지 (텔레그램 메시지에 추가할 1줄). 자동 등록 0개면 빈 문자열.
+        제안 메시지 (텔레그램 메시지에 추가). 신규 후보 0개면 빈 문자열 또는 스킵 안내.
     """
+    from app.models.theme import Theme  # 지연 import (순환 방지)
+
     try:
         themes_extracted = _extract_themes_from_analysis(analysis)
         if not themes_extracted:
             return ""
 
-        new_count, skip_count = await _auto_register_themes(themes_extracted)
+        async with async_session() as session:
+            existing_result = await session.execute(select(Theme.name))
+            existing_names = set(existing_result.scalars().all())
 
-        if new_count > 0:
-            msg = (
-                f"\n✅ <b>{new_count}개 테마 자동 등록됨</b> "
-                f"(다음 월요일 08:00 자동 스캔 예정)"
-            )
-            if skip_count > 0:
-                msg += f" · 기존 {skip_count}개 스킵"
-            return msg
-        elif skip_count > 0:
-            return f"\nℹ️ 모두 기존 테마 ({skip_count}개)"
-        else:
+        new_themes = [t for t in themes_extracted if t["name"] not in existing_names]
+        skipped = [t["name"] for t in themes_extracted if t["name"] in existing_names]
+
+        if not new_themes:
+            if skipped:
+                return f"\nℹ️ 발굴된 테마 {len(skipped)}건 모두 기존 테마와 중복"
             return ""
+
+        escape = telegram_service.escape_html
+        lines = [
+            "",
+            f"🆕 <b>신규 테마 후보 {len(new_themes)}건</b> — 등록하려면 아래 명령을 그대로 보내세요:",
+            "",
+        ]
+        for theme in new_themes:
+            keywords = ",".join(theme["keywords"])
+            cmd = f'/theme-add "{theme["name"]}" {keywords}'
+            lines.append(f"<code>{escape(cmd)}</code>")
+
+        if skipped:
+            lines.append("")
+            lines.append(f"ℹ️ 기존 테마 {len(skipped)}건 스킵: {escape(', '.join(skipped))}")
+
+        return "\n".join(lines)
     except Exception:
-        logger.exception("테마 자동 등록 실패 (발굴 메시지는 정상)")
+        logger.exception("테마 제안 생성 실패 (발굴 메시지는 정상)")
         return ""
 
 
@@ -587,10 +540,10 @@ async def auto_register_from_analysis(analysis: str) -> str:
 async def send_weekly_theme_report() -> None:
     """주간 테마 발굴 리포트 (스케줄러에서 호출)
 
-    v3 권고 1+2+3 통합:
-    - 발굴 결과를 Theme DB에 자동 등록
+    v3 권고 2+3 + 승인 게이트:
+    - 발굴 결과는 자동 등록하지 않고 /theme-add 명령어로 제안 (승인 게이트)
     - 빈도 분석 + 시장 주목 검증 (TOP 5)
-    - 결과 메시지에 자동 등록 + ✅/⚠️ 마크 추가
+    - 결과 메시지에 등록 명령어 제안 + ✅/⚠️ 마크 추가
     """
     logger.info("주간 테마 발굴 리포트 시작")
 
@@ -602,8 +555,8 @@ async def send_weekly_theme_report() -> None:
         )
         return
 
-    # 권고 1: 자동 등록 (공통 헬퍼)
-    auto_register_summary = await auto_register_from_analysis(result["analysis"])
+    # 승인 게이트: 자동 등록 대신 명령어 제안
+    suggest_summary = await suggest_themes_from_analysis(result["analysis"])
 
     # 권고 2+3: 빈도 분석 + 시장 주목 검증
     top_stocks, name_titles = await _analyze_stock_frequency_with_titles(days=30)
@@ -628,9 +581,9 @@ async def send_weekly_theme_report() -> None:
         escape(result["analysis"]),
     ]
 
-    # 권고 1: 자동 등록 결과
-    if auto_register_summary:
-        parts.append(auto_register_summary)
+    # 승인 게이트: 등록 명령어 제안
+    if suggest_summary:
+        parts.append(suggest_summary)
 
     if top_stocks:
         parts.append("")
@@ -657,3 +610,51 @@ async def send_weekly_theme_report() -> None:
     message = "\n".join(parts)
 
     await telegram_service.send_long_text(message)
+
+
+# ── 스테일 테마 자동 비활성화 (F-2) ──────────────────────────────────────
+
+
+async def deactivate_stale_themes(inactive_days: int = 28) -> list[str]:
+    """휴면 테마 자동 비활성화 (삭제 아님 — 감지 이력 보존).
+
+    기준 (3개 모두 충족):
+    - enabled=True
+    - 생성 후 inactive_days일 이상 경과
+    - 최근 inactive_days일간 ThemeDetection 0건
+
+    Returns: 비활성화된 테마명 리스트.
+    """
+    from app.models.theme import Theme, ThemeDetection  # 지연 import (순환 방지)
+
+    cutoff = now_kst().replace(tzinfo=None) - timedelta(days=inactive_days)
+    deactivated: list[str] = []
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Theme).where(Theme.enabled == True)  # noqa: E712
+        )
+        themes = list(result.scalars().all())
+
+        for theme in themes:
+            # 생성 후 inactive_days일 이상 경과한 테마만 대상
+            if theme.created_at is None or theme.created_at > cutoff:
+                continue
+            # 최근 inactive_days일간 감지 이력이 하나라도 있으면 유지
+            det_result = await session.execute(
+                select(ThemeDetection.id)
+                .where(ThemeDetection.theme_id == theme.id)
+                .where(ThemeDetection.detected_at >= cutoff)
+                .limit(1)
+            )
+            if det_result.first() is not None:
+                continue
+
+            theme.enabled = False
+            deactivated.append(theme.name)
+            logger.info("휴면 테마 비활성화: %s", theme.name)
+
+        if deactivated:
+            await session.commit()
+
+    return deactivated

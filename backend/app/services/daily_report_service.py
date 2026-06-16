@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any
 
 from app.collectors import dart_collector, news_collector, price_collector
 from app.database import async_session
 from app.services import telegram_service, watchlist_service
+from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ def _fetch_stock_data_sync(stock_code: str) -> dict[str, Any] | None:
     여기서 RSI/MA/거래량 비율을 계산한다 (도메인 로직).
     """
     try:
-        start = date.today() - timedelta(days=120)
+        start = today_kst() - timedelta(days=120)
         df = price_collector.fetch_close_history(stock_code, start=start)
         if df is None or len(df) < 2:
             return None
@@ -84,7 +85,7 @@ async def generate_daily_report() -> str | None:
         return None
 
     all_disclosures = await dart_collector.get_today_disclosures()
-    today_str = date.today().strftime("%m/%d")
+    today_str = today_kst().strftime("%m/%d")
 
     lines = [f"📊 <b>관심종목 일일 리포트</b> ({today_str})", ""]
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from sqlalchemy import select
@@ -17,6 +17,7 @@ from app.services import (
     market_risk_simple,
     watchlist_service,
 )
+from app.utils.timezone import now_kst, today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ async def generate_daily_brief(
 ) -> DailyBrief:
     """매일 아침 브리프 생성 파이프라인 (target_date 지정 시 백필)"""
 
-    brief_date = target_date or date.today()
+    brief_date = target_date or today_kst()
 
     # 1. 데이터 수집 (개별 실패 허용)
     logger.info("브리프 생성 시작 (date=%s)", brief_date)
@@ -109,7 +110,7 @@ async def generate_daily_brief(
         watchlist_check=watchlist_data,
         investor_flow=investor_flow,
         market_risk=market_risk,
-        created_at=datetime.now(),
+        created_at=now_kst().replace(tzinfo=None),
     )
 
     # 5. DB 저장

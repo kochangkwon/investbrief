@@ -12,12 +12,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any, Optional
 
 import pandas as pd
 
 from app.collectors import price_collector
+from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ def _calc_ma(closes: list[float], period: int) -> Optional[float]:
 
 def _fetch_closes_sync(stock_code: str) -> list[float]:
     """직전 180일 종가 (오름차순). 실패/컬럼 누락 시 빈 리스트."""
-    end = date.today()
+    end = today_kst()
     start = end - timedelta(days=180)
     df = price_collector.fetch_close_history(stock_code, start=start, end=end)
     if df is None or "Close" not in df.columns:
@@ -155,9 +156,20 @@ def _check_price_filters(
 def _check_market_cap_filter(
     mcap: Optional[int],
 ) -> tuple[Optional[bool], list[str], dict[str, Any]]:
-    """F6: 시총 ≥ PREFILTER_MIN_MARKET_CAP."""
+    """F6: 시총 ≥ PREFILTER_MIN_MARKET_CAP.
+
+    정책 (StockAI 매매 파이프라인 입력 기준):
+    - mcap == -1 (리스팅에 코드 없음) → 제외 (fail-closed)
+    - mcap is None (리스팅 로드 자체 실패) → 제외 (fail-closed) + 경고 로그
+      ※ 캐시 도입으로 스캔당 최대 2회 다운로드라 실패 확률이 낮아짐.
+        리스팅 실패는 전 종목에 동일 적용되므로 그날 시그널 0건 = 의도된 안전 동작.
+    - mcap < 기준 → 제외
+    """
     if mcap is None:
-        return None, ["시총 조회 실패"], {}
+        logger.warning("[prefilter] 시총 리스팅 로드 실패 — fail-closed 제외")
+        return False, ["F6: 시총 조회 실패 (리스팅 로드 실패) — 제외"], {}
+    if mcap == -1:
+        return False, ["F6: 리스팅에 종목 없음 — 제외"], {"market_cap": -1}
     if mcap < PREFILTER_MIN_MARKET_CAP:
         return False, [
             f"F6: 시총 {mcap / 1e8:.0f}억 < "

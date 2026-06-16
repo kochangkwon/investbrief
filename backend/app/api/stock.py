@@ -1,11 +1,16 @@
 """종목별 뉴스/공시 API"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.auth import verify_admin_api_key
 from app.collectors import dart_collector, news_collector
 
-router = APIRouter(prefix="/api/stock", tags=["stock"])
+router = APIRouter(
+    prefix="/api/stock",
+    tags=["stock"],
+    dependencies=[Depends(verify_admin_api_key)],
+)
 
 
 @router.get("/{stock_code}/news")

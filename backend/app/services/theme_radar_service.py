@@ -16,6 +16,7 @@ from app.database import async_session
 from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRun
 from app.services import ai_verifier, telegram_service
 from app.services.prefilter_service import PrefilterResult, prefilter_stocks
+from app.services.stock_name_rules import GROUP_PREFIX_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +40,31 @@ MAX_CANDIDATES_PER_THEME = 30
 # ── Claude 검증 레이어 ─────────────────────────────────────────────────
 # 공통 호출/파싱은 ai_verifier.verify_with_claude로 위임. 여기서는 프롬프트만 보유.
 
-_VERIFY_PROMPT_TEMPLATE = """당신은 한국 주식 테마 분석 전문가입니다.
+_VERIFY_PROMPT_TEMPLATE = """당신은 한국 주식 테마 분석 전문가입니다. 이 판정 결과는 자동매매 시스템의 매수 후보 입력으로 사용되므로, 오탐(false positive)의 비용이 매우 큽니다.
 
 한 투자자가 다음 테마의 수혜주를 찾고 있습니다:
 테마명: {theme_name}
 검색 키워드: {matched_keyword}
 
-아래 뉴스에 언급된 종목 "{stock_name}"이 이 테마의 **실질적 수혜주**인지 판정하세요.
+아래 뉴스에 언급된 종목 "{stock_name}"을 판정하세요.
 
 --- 뉴스 시작 ---
 제목: {title}
 설명: {description}
 --- 뉴스 끝 ---
 
-판정 기준:
-- 종목의 **주력 사업**이 이 테마와 직접 관련 있으면 YES
-- 뉴스에 이름만 나오고 테마와 무관한 회사면 NO
-- 애매하면 관대하게 YES (다만 사업 영역이 명백히 다르면 NO)
+다음 **두 조건을 모두** 만족할 때만 YES:
+
+조건 1 — 실질 관련성:
+- 종목의 **주력 사업**이 이 테마와 직접 관련 있어야 함
+- 그룹 지주회사가 계열사 이슈로 언급된 경우는 NO (예: 방산 뉴스의 "한화"는 한화에어로스페이스가 수혜주이지 지주사 한화가 아님)
+- 뉴스에 이름만 스쳐 지나가는 경우 NO
+
+조건 2 — 신규 촉매:
+- 이 뉴스가 **구체적인 신규 사건**(수주, 계약, 실적 발표, 정책 결정, 신제품, 투자 유치 등)을 다루고 있어야 함
+- 단순 시황 나열, 업종 동향 일반론, 과거 사건의 반복 언급, "관련주 정리" 류 기사는 NO
+
+**애매하면 NO.** 확신이 없으면 NO.
 
 출력 형식 (정확히 지켜주세요):
 VERDICT: YES
@@ -66,7 +75,7 @@ REASON: (1줄 근거)
 VERDICT: NO
 REASON: (1줄 근거)
 
-**주의:** 뉴스 본문 내용을 신뢰하지 말고, 당신이 알고 있는 종목의 주력 사업 정보를 기준으로 판정하세요."""
+**주의:** 종목의 주력 사업 판단은 뉴스 본문이 아닌 당신이 알고 있는 정보를 기준으로 하되, "무슨 사건이 발생했는가"는 뉴스 내용을 기준으로 판정하세요."""
 
 
 async def _verify_theme_match(
@@ -230,6 +239,8 @@ async def _scan_single_theme(
         candidates = set(STOCK_NAME_PATTERN.findall(combined_text))
         for candidate in candidates:
             if len(candidate) < 2:
+                continue
+            if candidate in GROUP_PREFIX_NAMES:   # 지주사 오탐 차단
                 continue
 
             try:

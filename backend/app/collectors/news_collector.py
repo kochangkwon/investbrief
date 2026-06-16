@@ -11,6 +11,7 @@ import feedparser
 import httpx
 
 from app.config import settings
+from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ async def get_today_news(
     RSS는 historical 보존이 보장되지 않아 today일 때만 사용.
     """
     all_items: list[dict[str, Any]] = []
-    is_today = target_date is None or target_date == date.today()
+    is_today = target_date is None or target_date == today_kst()
 
     # RSS 수집 (today일 때만 사용)
     if is_today:

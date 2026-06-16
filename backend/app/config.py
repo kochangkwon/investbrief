@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # Internal API (StockAI ↔ InvestBrief)
     stockai_internal_api_key: str = ""
 
+    # 공개 API 보호용 (프론트엔드 프록시 ↔ 백엔드)
+    admin_api_key: str = ""
+
     # Database
     database_url: str = "sqlite+aiosqlite:///./investbrief.db"
 
@@ -29,7 +32,7 @@ class Settings(BaseSettings):
     # Brief
     brief_send_hour: int = 7
     brief_send_minute: int = 30
-    ai_model: str = "claude-sonnet-4-20250514"
+    ai_model: str = "claude-opus-4-8"
     ai_max_tokens: int = 1000
 
     # US Market (모닝브리프와 분리 발송)
