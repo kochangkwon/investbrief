@@ -16,7 +16,7 @@ from app.database import async_session
 from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRun
 from app.services import ai_verifier, telegram_service
 from app.services.prefilter_service import PrefilterResult, prefilter_stocks
-from app.services.stock_name_rules import GROUP_PREFIX_NAMES
+from app.services.stock_name_rules import GROUP_PREFIX_NAMES, STOPWORDS
 from app.utils.timezone import now_kst_naive
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,44 @@ KST = ZoneInfo("Asia/Seoul")
 # - 후속 글자: 영문/한글/숫자/& (KT&G, F&F 등)
 # - 길이 2~15자 (한 글자 단어 후속 처리에서 제외)
 STOCK_NAME_PATTERN = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9&]{1,14})")
+
+# 한글 조사 — 토큰 끝에 붙으면 종목명이 아닐 가능성 높음
+_JOSA_SUFFIXES = (
+    "으로", "에서", "에게", "에는", "에도", "이라", "라고", "하며", "하면서",
+    "지만", "보다", "처럼", "까지", "부터", "이라는", "라는", "하는", "되는",
+)
+
+# HTML 엔티티 잔재
+_HTML_JUNK = {"quot", "amp", "lt", "gt", "nbsp", "apos"}
+
+
+def _is_noise_token(token: str) -> bool:
+    """네이버 AC 호출 전 명백한 노이즈를 쳐낸다.
+
+    True면 후보에서 제외(네이버 호출 안 함). 보수적 — 애매하면 False(통과).
+    정확일치 필터가 뒤에 있으므로 약간 새도 최종 결과는 안전.
+    목적은 "최종 판정"이 아니라 "불필요한 네이버 호출 절약".
+    """
+    if token.lower() in _HTML_JUNK:                       # HTML 잔재
+        return True
+    if any(ch.isdigit() for ch in token):                 # 숫자 포함 (금액/수치)
+        return True
+    if token.endswith(("원", "원으로", "억원", "달러", "달러를", "퍼센트")):  # 금액 단위
+        return True
+    if len(token) >= 3 and token.endswith(_JOSA_SUFFIXES):  # 조사로 끝남 (3자 이상만)
+        return True
+    return False
+
+
+_ac_cache: dict[str, list] = {}   # 종목명 → search_stocks 결과 (스캔 1회 수명)
+
+
+async def _cached_search_stocks(name: str):
+    if name in _ac_cache:
+        return _ac_cache[name]
+    result = await search_stocks(name, limit=1)
+    _ac_cache[name] = result
+    return result
 
 # ThemeDetection 중복 검증 윈도우 (일).
 # 같은 종목을 이 기간 이내 다시 검증하지 않는다 (Claude API 비용 절약).
@@ -117,6 +155,7 @@ async def scan_all_themes() -> dict[str, int]:
     """
     scan_date = datetime.now(KST).date()
     results: dict[str, int] = {}
+    _ac_cache.clear()   # 스캔 1회 수명 캐시 초기화 (상장/상폐 반영)
 
     try:
         await _start_scan_run(scan_date)
@@ -241,11 +280,15 @@ async def _scan_single_theme(
         for candidate in candidates:
             if len(candidate) < 2:
                 continue
+            if candidate in STOPWORDS:            # 불용어 차단 (호출 전)
+                continue
             if candidate in GROUP_PREFIX_NAMES:   # 지주사 오탐 차단
+                continue
+            if _is_noise_token(candidate):        # 숫자/금액/조사/HTML잔재 차단
                 continue
 
             try:
-                matches = await search_stocks(candidate, limit=1)
+                matches = await _cached_search_stocks(candidate)
             except Exception:
                 continue
 
