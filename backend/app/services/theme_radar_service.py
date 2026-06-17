@@ -266,6 +266,46 @@ async def _scan_single_theme(
                     "url": news.get("link", ""),
                 }
 
+    # ── DART 🟢 호재 공시 추출 (테마 키워드가 공시 제목에 포함된 것만) ──
+    # DART는 stock_code를 직접 제공 → 네이버 AC 역추적·정확일치 필터 불필요(이미 정확).
+    # 단, 이후 Claude 검증 + prefilter는 뉴스 추출분과 동일하게 통과한다.
+    try:
+        from app.collectors import dart_collector
+        disclosures = await dart_collector.get_today_disclosures(target_date=scan_date)
+    except Exception:
+        logger.exception(
+            "[scan_single_theme] DART 수집 실패 — 뉴스만으로 진행: %s", theme.name
+        )
+        disclosures = []
+
+    for disc in disclosures:
+        if disc.get("importance") != "🟢":   # 호재 공시만
+            continue
+        stock_code = (disc.get("stock_code") or "").strip()
+        if not stock_code or len(stock_code) != 6:
+            continue   # 비상장/코드 없는 공시 제외
+
+        disc_title = disc.get("title", "")
+        # 이 테마의 키워드가 공시 제목에 포함되는지
+        matched_kw = next((k for k in keywords if k and k in disc_title), None)
+        if not matched_kw:
+            continue
+
+        if stock_code not in detected_stocks:   # 같은 코드면 뉴스 추출분 선점
+            rcept_no = disc.get("rcept_no", "")
+            detected_stocks[stock_code] = {
+                "stock_code": stock_code,
+                "stock_name": disc.get("corp_name", ""),
+                "headline": f"[공시] {disc_title}",   # 출처 표시 (알림 가독성)
+                "description": "",
+                "matched_keyword": matched_kw,
+                "url": (
+                    f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+                    if rcept_no else ""
+                ),
+                "source_type": "dart",   # 출처별 성적 측정용 태그
+            }
+
     if not detected_stocks:
         return 0
 
