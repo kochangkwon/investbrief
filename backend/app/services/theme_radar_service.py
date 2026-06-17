@@ -36,6 +36,9 @@ _JOSA_SUFFIXES = (
     "지만", "보다", "처럼", "까지", "부터", "이라는", "라는", "하는", "되는",
 )
 
+# 한 글자 조사 — 오탐 위험 커서 len >= 4 에서만 차단 (짧은 종목명 보호)
+_JOSA_SINGLE = ("에", "은", "는", "이", "가", "을", "를", "의", "와", "과", "도", "로")
+
 # HTML 엔티티 잔재
 _HTML_JUNK = {"quot", "amp", "lt", "gt", "nbsp", "apos"}
 
@@ -54,6 +57,8 @@ def _is_noise_token(token: str) -> bool:
     if token.endswith(("원", "원으로", "억원", "달러", "달러를", "퍼센트")):  # 금액 단위
         return True
     if len(token) >= 3 and token.endswith(_JOSA_SUFFIXES):  # 조사로 끝남 (3자 이상만)
+        return True
+    if len(token) >= 4 and token.endswith(_JOSA_SINGLE):    # 한 글자 조사 (4자+)
         return True
     return False
 
