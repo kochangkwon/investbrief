@@ -17,7 +17,7 @@ from app.services import (
     market_risk_simple,
     watchlist_service,
 )
-from app.utils.timezone import now_kst, today_kst
+from app.utils.timezone import now_kst_naive, today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ async def generate_daily_brief(
         watchlist_check=watchlist_data,
         investor_flow=investor_flow,
         market_risk=market_risk,
-        created_at=now_kst().replace(tzinfo=None),
+        created_at=now_kst_naive(),
     )
 
     # 5. DB 저장

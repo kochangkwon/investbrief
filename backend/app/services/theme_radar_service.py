@@ -17,6 +17,7 @@ from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRu
 from app.services import ai_verifier, telegram_service
 from app.services.prefilter_service import PrefilterResult, prefilter_stocks
 from app.services.stock_name_rules import GROUP_PREFIX_NAMES
+from app.utils.timezone import now_kst_naive
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +292,7 @@ async def _scan_single_theme(
 
     # 중복 검증 윈도우 — DETECTION_WINDOW_DAYS 이내 검증한 종목만 SKIP.
     # 그 이전 레코드는 무시 → 폭등 후 RSI 정상화된 종목을 매수 적기에 재검증.
-    cutoff = datetime.now() - timedelta(days=DETECTION_WINDOW_DAYS)
+    cutoff = now_kst_naive() - timedelta(days=DETECTION_WINDOW_DAYS)
     existing_result = await session.execute(
         select(ThemeDetection.stock_code)
         .where(ThemeDetection.theme_id == theme.id)

@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.utils.timezone import now_kst_naive
 
 _KST = ZoneInfo("Asia/Seoul")
 
@@ -39,7 +40,7 @@ class Theme(Base):
     keywords: Mapped[str] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, default=datetime.datetime.now
+        DateTime, default=now_kst_naive
     )
 
 
@@ -61,7 +62,7 @@ class ThemeDetection(Base):
     matched_keyword: Mapped[str] = mapped_column(String(100))
     news_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     detected_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, default=datetime.datetime.now, index=True
+        DateTime, default=now_kst_naive, index=True
     )
 
 

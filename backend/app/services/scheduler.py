@@ -17,7 +17,7 @@ from app.models.brief import DailyBrief
 from app.services import ai_summarizer, brief_service, daily_report_service, telegram_service, theme_discovery_service, theme_radar_service, watchlist_service
 from app.services.theme_alert_analytics import send_monthly_alert_report
 from app.services.theme_alert_tracker import update_alert_returns_for_target
-from app.utils.timezone import now_kst, today_kst
+from app.utils.timezone import now_kst_naive, today_kst
 
 KST = ZoneInfo("Asia/Seoul")
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ async def _generate_and_send():
                 logger.info("스케줄: 오늘 브리프 존재, 미발송 → 발송 진행")
                 sent = await telegram_service.send_brief(existing)
                 if sent:
-                    existing.sent_at = now_kst().replace(tzinfo=None)
+                    existing.sent_at = now_kst_naive()
                     await session.commit()
                     logger.info("스케줄: 기존 브리프 재발송 성공")
                 else:
@@ -58,7 +58,7 @@ async def _generate_and_send():
             brief = await brief_service.generate_daily_brief(session)
             sent = await telegram_service.send_brief(brief)
             if sent:
-                brief.sent_at = now_kst().replace(tzinfo=None)
+                brief.sent_at = now_kst_naive()
                 await session.commit()
                 logger.info("스케줄: 모닝브리프 완료")
             else:

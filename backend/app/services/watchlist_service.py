@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors import dart_collector, news_collector, price_collector
 from app.models.watchlist import Watchlist
-from app.utils.timezone import now_kst
+from app.utils.timezone import now_kst_naive
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ async def add(session: AsyncSession, stock_code: str, stock_name: str, memo: str
         stock_code=stock_code,
         stock_name=stock_name,
         memo=memo,
-        created_at=now_kst().replace(tzinfo=None),
+        created_at=now_kst_naive(),
     )
     session.add(item)
     await session.commit()

@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ async def get_today_disclosures(target_date: date | None = None) -> list[dict[st
         logger.warning("DART API 키 미설정")
         return []
 
-    d = target_date or date.today()
+    d = target_date or today_kst()
     date_str = d.strftime("%Y%m%d")
 
     items: list[dict[str, Any]] = []

@@ -78,7 +78,7 @@ def fetch_last_close(
     Returns:
         float close (0인 경우 None 반환 — 호출 측 호환), or None
     """
-    target = on_or_before or date.today()
+    target = on_or_before or today_kst()
     start = target - timedelta(days=lookback_days)
     df = fetch_close_history(code, start=start, end=target)
     if df is None:
@@ -112,7 +112,7 @@ def fetch_close_with_change(
         - 데이터 1건만 있으면 change=0.0
         - round 단위는 호출 측 책임
     """
-    anchor = target_date or date.today()
+    anchor = target_date or today_kst()
     start = anchor - timedelta(days=lookback_days)
     end = anchor + timedelta(days=1)
     df = fetch_close_history(code, start=start, end=end)

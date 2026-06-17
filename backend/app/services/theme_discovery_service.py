@@ -17,7 +17,7 @@ from app.database import async_session
 from app.models.brief import DailyBrief
 from app.services import ai_verifier, telegram_service
 from app.services.stock_name_rules import GROUP_PREFIX_NAMES, STOPWORDS
-from app.utils.timezone import now_kst, today_kst
+from app.utils.timezone import now_kst_naive, today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -627,7 +627,7 @@ async def deactivate_stale_themes(inactive_days: int = 28) -> list[str]:
     """
     from app.models.theme import Theme, ThemeDetection  # 지연 import (순환 방지)
 
-    cutoff = now_kst().replace(tzinfo=None) - timedelta(days=inactive_days)
+    cutoff = now_kst_naive() - timedelta(days=inactive_days)
     deactivated: list[str] = []
 
     async with async_session() as session:

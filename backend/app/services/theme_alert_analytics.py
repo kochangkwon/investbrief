@@ -16,6 +16,7 @@ from sqlalchemy import and_, func, select
 from app.database import async_session
 from app.models.theme_alert import ThemeAlert, ThemeAlertCandidate
 from app.services import telegram_service
+from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ def _format_report(period_label: str, stats: dict[str, Any]) -> str:
 
 async def send_monthly_alert_report() -> bool:
     """매월 1일 09:10 호출 — 지난달 통계 텔레그램 발송."""
-    today = date.today()
+    today = today_kst()
     start_dt, end_dt = _last_month_range(today)
     period_label = f"{start_dt.strftime('%Y-%m')}"
 
