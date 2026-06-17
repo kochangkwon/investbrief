@@ -230,7 +230,7 @@ async def _weekly_theme_discovery():
     except Exception:
         logger.exception("주간 테마 발굴 실패")
 
-    # 휴면 테마 자동 비활성화 (28일 무감지 + 생성 28일 경과)
+    # 휴면 테마 자동 비활성화 (42일 무감지 + 생성 42일 경과 — 계절성 테마 보호)
     try:
         deactivated = await theme_discovery_service.deactivate_stale_themes()
         if deactivated:

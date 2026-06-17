@@ -615,13 +615,16 @@ async def send_weekly_theme_report() -> None:
 # ── 스테일 테마 자동 비활성화 (F-2) ──────────────────────────────────────
 
 
-async def deactivate_stale_themes(inactive_days: int = 28) -> list[str]:
+async def deactivate_stale_themes(inactive_days: int = 42) -> list[str]:
     """휴면 테마 자동 비활성화 (삭제 아님 — 감지 이력 보존).
 
     기준 (3개 모두 충족):
     - enabled=True
     - 생성 후 inactive_days일 이상 경과
     - 최근 inactive_days일간 ThemeDetection 0건
+
+    기본 42일(6주) 근거: ~3개월 데이터 축적 초기 단계라 28일은 분기 실적·정책
+    사이클 등 계절성 테마를 조기에 죽일 위험 → 6주로 완화.
 
     Returns: 비활성화된 테마명 리스트.
     """
