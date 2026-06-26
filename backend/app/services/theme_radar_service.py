@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.collectors.news_collector import _fetch_naver_news
 from app.collectors.stock_search import search_stocks
 from app.database import async_session
-from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRun
+from app.models.theme import (
+    Theme,
+    ThemeDetection,
+    ThemeFeatureSnapshot,
+    ThemeScanResult,
+    ThemeScanRun,
+)
 from app.services import ai_verifier, telegram_service
 from app.services.prefilter_service import PrefilterResult, prefilter_stocks
 from app.services.stock_name_rules import GROUP_PREFIX_NAMES, STOPWORDS
@@ -412,6 +418,8 @@ async def _scan_single_theme(
     for d in new_detections:
         result = prefilter_map.get(d["stock_code"])
         if result is None or result.passed:
+            if result is not None:
+                d["supply_demand"] = _supply_demand_subset(result.metrics)
             filtered.append(d)
         else:
             rejected.append((d, result.reasons))
@@ -424,6 +432,14 @@ async def _scan_single_theme(
         "[scan_single_theme] %s: verified=%d → filtered=%d (rejected=%d)",
         theme.name, len(new_detections), len(filtered), len(rejected),
     )
+
+    # 피처 스냅샷 기록 (통과+제외 전체 — "오를 종목" 검증 데이터셋 누적)
+    try:
+        await _record_feature_snapshots(
+            scan_date, theme.name, new_detections, prefilter_map,
+        )
+    except Exception:
+        logger.exception("[feature_snapshot] 기록 실패: %s", theme.name)
 
     if filtered or rejected:
         await _send_theme_alert(theme.name, filtered, rejected=rejected)
@@ -502,6 +518,65 @@ async def _fail_scan_run(scan_date: date, error: str) -> None:
         await session.commit()
 
 
+_SUPPLY_DEMAND_KEYS = (
+    "short_weight_5d", "short_weight_prev5", "short_weight_rising",
+    "lending_balance", "lending_surge", "institution_net", "foreign_net",
+)
+
+
+def _supply_demand_subset(metrics: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """prefilter metrics에서 수급(공매도/대차/기관·외국인) 키만 추출. 없으면 None."""
+    sd = {k: metrics[k] for k in _SUPPLY_DEMAND_KEYS if k in metrics}
+    return sd or None
+
+
+async def _record_feature_snapshots(
+    scan_date: Optional[date],
+    theme_name: str,
+    detections: list[dict[str, Any]],
+    prefilter_map: dict[str, "PrefilterResult"],
+) -> None:
+    """감지 시점 피처 스냅샷 기록 (통과+제외 전체).
+
+    prefilter가 이미 계산한 전체 metrics를 저장만 한다. scan_date가 없으면
+    (수동 호출 등) 앵커가 없어 스킵. UNIQUE 충돌은 사전 SELECT로 회피.
+    """
+    if scan_date is None:
+        return
+    async with async_session() as session:
+        for d in detections:
+            code = d.get("stock_code")
+            name = d.get("stock_name")
+            result = prefilter_map.get(code) if code else None
+            if not code or not name or result is None:
+                continue
+            existing = await session.execute(
+                select(ThemeFeatureSnapshot.id).where(
+                    ThemeFeatureSnapshot.scan_date == scan_date,
+                    ThemeFeatureSnapshot.theme_name == theme_name,
+                    ThemeFeatureSnapshot.stock_code == code,
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue
+            session.add(
+                ThemeFeatureSnapshot(
+                    scan_date=scan_date,
+                    theme_name=theme_name,
+                    stock_code=code,
+                    stock_name=name,
+                    passed=bool(result.passed),
+                    reject_reasons=(result.reasons or None) if not result.passed else None,
+                    features=result.metrics or None,
+                )
+            )
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("피처 스냅샷 commit 실패: %s", theme_name)
+
+
 async def save_scan_results(
     scan_date: date,
     theme_name: str,
@@ -544,6 +619,7 @@ async def save_scan_results(
                     detected_keywords=keywords_list,
                     source_url=d.get("url"),
                     claude_validation_passed=True,
+                    supply_demand=d.get("supply_demand"),
                 )
             )
         try:

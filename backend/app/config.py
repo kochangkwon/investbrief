@@ -42,5 +42,11 @@ class Settings(BaseSettings):
     # Finnhub fallback (yfinance rate limit 시 자동 전환)
     finnhub_api_key: str = ""
 
+    # 키움 REST API (테마 선정 수급 필터 — 공매도/대차/기관·외국인)
+    kiwoom_app_key: str = ""
+    kiwoom_app_secret: str = ""
+    kiwoom_account_no: str = ""
+    kiwoom_is_mock: bool = False
+
 
 settings = Settings()

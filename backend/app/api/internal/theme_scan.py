@@ -99,6 +99,7 @@ async def get_theme_scan_results(
             "keywords": r.detected_keywords or [],
             "source_url": r.source_url,
             "detected_at": r.created_at.isoformat() if r.created_at else None,
+            "supply_demand": r.supply_demand,
         })
 
     return {

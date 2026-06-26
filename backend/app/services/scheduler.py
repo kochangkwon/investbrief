@@ -213,12 +213,22 @@ async def _daily_report():
 async def _daily_theme_scan():
     """평일 매일 테마 선행 스캐너 (08:10 KST)"""
     logger.info("일일 테마 스캔 시작")
+    await telegram_service.send_text("🔍 테마 스캔 시작")
     try:
         results = await theme_radar_service.scan_all_themes()
         total_new = sum(results.values())
         logger.info("일일 테마 스캔 완료 — 신규 감지 %d건: %s", total_new, results)
+        hit_lines = [
+            f"• {telegram_service.escape_html(name)}: {count}건"
+            for name, count in results.items() if count
+        ]
+        detail = "\n" + "\n".join(hit_lines) if hit_lines else ""
+        await telegram_service.send_text(
+            f"✅ 테마 스캔 완료 — 신규 감지 {total_new}건{detail}"
+        )
     except Exception:
         logger.exception("일일 테마 스캔 실패")
+        await telegram_service.send_text("⚠️ 테마 스캔 중 오류가 발생했습니다.")
 
 
 async def _weekly_theme_discovery():
@@ -241,6 +251,53 @@ async def _weekly_theme_discovery():
             logger.info("휴면 테마 %d건 비활성화: %s", len(deactivated), deactivated)
     except Exception:
         logger.exception("휴면 테마 정리 실패")
+
+
+from pathlib import Path
+
+# "오를 종목" 피처 검증 자동 실행 (데이터 ~2.5개월 누적 후 1회)
+FEATURE_VALIDATION_TARGET = date(2026, 9, 11)
+_FEATURE_VALIDATION_MARKER = Path(__file__).resolve().parents[2] / ".feature_validation_done"
+
+
+async def _feature_validation_check():
+    """목표일 이후 매일 게이트 체크 → 데이터 충분하면 1회 분석·발송 후 마커."""
+    if _FEATURE_VALIDATION_MARKER.exists():
+        return
+    if today_kst() < FEATURE_VALIDATION_TARGET:
+        return
+    try:
+        from app.services import feature_validation_service as fv
+        from app.services import stock_picker_service as sp
+        result = await fv.analyze()
+        if not result.get("ready"):
+            logger.info("피처 검증 대기: %s", result.get("reason"))
+            return
+        # 양수·robust 신호를 픽커 설정으로 저장 (없으면 빈 리스트 → 픽커 무동작)
+        signals = fv.extract_picker_signals(result)
+        sp.save_signals(signals, validated_at=today_kst().isoformat())
+        await telegram_service.send_text(fv.format_report(result))
+        if signals:
+            await telegram_service.send_text(
+                f"✅ 양수·robust 신호 {len(signals)}개 발견 → 내일부터 '오를 종목 후보' 자동 발송."
+            )
+        else:
+            await telegram_service.send_text(
+                "ℹ️ 양수·robust 신호 없음 → '오를 종목 후보'는 보류(방어 필터는 유지)."
+            )
+        _FEATURE_VALIDATION_MARKER.write_text(today_kst().isoformat())
+        logger.info("피처 검증 자동 분석 발송 완료 (N=%d, 신호=%d)", result["n"], len(signals))
+    except Exception:
+        logger.exception("피처 검증 자동 분석 실패")
+
+
+async def _stock_picker_run():
+    """매일 스캔 후 — 검증 신호가 있으면 당일 통과 종목 점수화·후보 발송 (없으면 no-op)."""
+    try:
+        from app.services import stock_picker_service as sp
+        await sp.run_and_send()
+    except Exception:
+        logger.exception("스케줄: 오를 종목 후보 픽커 실패")
 
 
 async def _track_alert_returns_30d():
@@ -342,6 +399,17 @@ def start_scheduler():
         misfire_grace_time=3600,  # 서버 부팅 지연 대비 (일요일 서버 중지 환경)
     )
     scheduler.add_job(_cleanup_old_data, "cron", hour=18, minute=0, id="cleanup")
+
+    # "오를 종목" 피처 검증 — 목표일 이후 매일 체크, 충분하면 1회 자동 분석·발송
+    scheduler.add_job(
+        _feature_validation_check, "cron", hour=18, minute=35,
+        id="feature_validation_check", replace_existing=True, misfire_grace_time=3600,
+    )
+    # 오를 종목 후보 픽커 — 평일 스캔(08:10) 후 검증 신호 있으면 자동 발송
+    scheduler.add_job(
+        _stock_picker_run, "cron", day_of_week="mon-fri", hour=8, minute=25,
+        id="stock_picker_run", replace_existing=True, misfire_grace_time=600,
+    )
 
     # ── v3 Phase 3: 테마 알림 D+30/60/90 가격 추적 (매일 18:05/15/25) ──
     scheduler.add_job(

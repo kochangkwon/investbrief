@@ -106,6 +106,39 @@ class ThemeScanResult(Base):
     detected_keywords: Mapped[list[Any]] = mapped_column(_JsonList, default=list)
     source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     claude_validation_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 종목별 수급 (prefilter F7/F8 측정값 — StockAI 참고용)
+    supply_demand: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        _JsonList, nullable=True
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now_kst
+    )
+
+
+class ThemeFeatureSnapshot(Base):
+    """감지 시점 피처 스냅샷 — "오를 종목" 신호 검증용 데이터셋 누적.
+
+    통과·제외 종목을 **모두** 기록한다(생존편향 방지). 수익률은 저장하지 않고
+    scan_date 기준으로 사후에 FDR로 계산한다. 공매도/대차 등 히스토리 조회
+    기간이 짧은 피처를 영구 보존하는 게 핵심 목적.
+    """
+    __tablename__ = "theme_feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "scan_date", "theme_name", "stock_code",
+            name="uq_theme_feature_snap_date_theme_code",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scan_date: Mapped[datetime.date] = mapped_column(Date, nullable=False, index=True)
+    theme_name: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    stock_code: Mapped[str] = mapped_column(String(6), nullable=False, index=True)
+    stock_name: Mapped[str] = mapped_column(Text, nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reject_reasons: Mapped[Optional[list[Any]]] = mapped_column(_JsonList, nullable=True)
+    # 전체 prefilter 피처(rsi·이격·5일수익·시총·공매도·대차·기관/외국인)
+    features: Mapped[Optional[dict[str, Any]]] = mapped_column(_JsonList, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now_kst
     )

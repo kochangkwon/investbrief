@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from app.collectors import price_collector
+from app.collectors import kiwoom_collector, price_collector
 from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,10 @@ PREFILTER_MA20_RATIO_MAX = 1.30      # 현재가 ≤ MA20 × 1.30
 PREFILTER_MA60_RATIO_MAX = 1.50
 PREFILTER_5D_RETURN_MAX = 0.30       # 5일 누적 +30% 미만
 PREFILTER_MIN_MARKET_CAP = 50_000_000_000  # 500억 원
+
+# 수급 필터 (키움 REST) — 세력이 하락에 베팅 중인 종목 제외
+PREFILTER_SHORT_WEIGHT_MAX = 15.0    # 최근 5일 공매도 비중 평균(%) 상한
+PREFILTER_LENDING_SURGE_MAX = 1.5    # 대차잔고 급증 배수 상한 (최신/직전평균)
 
 PREFILTER_CONCURRENCY = 5
 
@@ -178,6 +182,43 @@ def _check_market_cap_filter(
     return True, [], {"market_cap": mcap}
 
 
+def _check_supply_demand_filter(
+    signal: Optional[dict[str, Any]],
+) -> tuple[Optional[bool], list[str], dict[str, Any]]:
+    """F7~F8: 키움 수급(공매도/대차) 필터.
+
+    - signal None(키 미설정/조회 실패) → (None, [], {}) → 보수적 통과
+    - F7: 최근 5일 공매도 비중 ≥ 상한 AND 상승 추세 → 제외
+    - F8: 대차잔고 급증(최신/직전평균 ≥ 상한) → 제외
+    기관·외국인 순매매 등 나머지 값은 메트릭으로만 첨부(하드 필터 아님).
+    """
+    if not signal:
+        return None, [], {}
+
+    metrics: dict[str, Any] = dict(signal)
+    fails: list[str] = []
+
+    sw5 = signal.get("short_weight_5d")
+    if (
+        sw5 is not None
+        and sw5 >= PREFILTER_SHORT_WEIGHT_MAX
+        and signal.get("short_weight_rising")
+    ):
+        fails.append(
+            f"F7: 공매도비중 {sw5:.1f}% ≥ {PREFILTER_SHORT_WEIGHT_MAX:.0f}% 상승추세"
+        )
+
+    surge = signal.get("lending_surge")
+    if surge is not None and surge >= PREFILTER_LENDING_SURGE_MAX:
+        fails.append(
+            f"F8: 대차잔고 급증 ×{surge:.2f} ≥ ×{PREFILTER_LENDING_SURGE_MAX}"
+        )
+
+    if fails:
+        return False, fails, metrics
+    return True, [], metrics
+
+
 # ── 통합 진입점 ─────────────────────────────────────────────────────
 
 
@@ -188,9 +229,10 @@ async def prefilter_stock(stock_code: str) -> PrefilterResult:
     재무 캐시 테이블이 없어 보수적 통과 처리. 명백 위반(False)이 하나라도
     있으면 제외, 조회 실패(None)는 통과.
     """
-    closes_result, mcap_result = await asyncio.gather(
+    closes_result, mcap_result, supply_result = await asyncio.gather(
         _fetch_closes(stock_code),
         _fetch_market_cap(stock_code),
+        kiwoom_collector.get_supply_demand_signal(stock_code),
         return_exceptions=True,
     )
 
@@ -206,17 +248,26 @@ async def prefilter_stock(stock_code: str) -> PrefilterResult:
     else:
         mcap = mcap_result
 
+    if isinstance(supply_result, Exception):
+        logger.warning("[prefilter] %s 수급 예외: %s", stock_code, supply_result)
+        supply: Optional[dict[str, Any]] = None
+    else:
+        supply = supply_result
+
     price_pass, price_reasons, price_metrics = _check_price_filters(closes)
     mcap_pass, mcap_reasons, mcap_metrics = _check_market_cap_filter(mcap)
+    supply_pass, supply_reasons, supply_metrics = _check_supply_demand_filter(supply)
 
-    explicitly_failed = price_pass is False or mcap_pass is False
+    explicitly_failed = (
+        price_pass is False or mcap_pass is False or supply_pass is False
+    )
     passed = not explicitly_failed
 
     return PrefilterResult(
         code=stock_code,
         passed=passed,
-        reasons=price_reasons + mcap_reasons,
-        metrics={**price_metrics, **mcap_metrics},
+        reasons=price_reasons + mcap_reasons + supply_reasons,
+        metrics={**price_metrics, **mcap_metrics, **supply_metrics},
     )
 
 
