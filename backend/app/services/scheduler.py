@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import signal
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -328,18 +326,6 @@ async def _monthly_alert_report():
         logger.exception("스케줄: 월간 테마 알림 리포트 실패")
 
 
-async def _weekday_shutdown():
-    """평일 19:00 서버 자동 종료 (graceful)"""
-    if not _is_weekday():
-        return
-    logger.info("스케줄: 평일 19:00 서버 자동 종료")
-    try:
-        await telegram_service.send_text("🛑 InvestBrief 서버 자동 종료 (평일 19:00)")
-    except Exception:
-        logger.exception("스케줄: 종료 알림 발송 실패 — 종료는 계속 진행")
-    os.kill(os.getpid(), signal.SIGTERM)
-
-
 async def _cleanup_old_data():
     """180일 이전 데이터 삭제 — 테마 발굴용 누적 데이터 확보"""
     try:
@@ -366,14 +352,14 @@ def start_scheduler():
 
     hour = settings.brief_send_hour
 
-    scheduler.add_job(_generate_and_send, "cron", hour=hour, minute=settings.brief_send_minute, id="morning_brief")
+    scheduler.add_job(_generate_and_send, "cron", day_of_week="mon-fri", hour=hour, minute=settings.brief_send_minute, id="morning_brief", replace_existing=True)
     scheduler.add_job(
         _send_us_market, "cron",
         day_of_week="mon-fri",
         hour=settings.us_market_send_hour, minute=settings.us_market_send_minute,
         id="us_market_brief", replace_existing=True, misfire_grace_time=300,
     )
-    scheduler.add_job(_midday_watchlist_check, "cron", hour=12, minute=0, id="midday_check")
+    scheduler.add_job(_midday_watchlist_check, "cron", day_of_week="mon-fri", hour=12, minute=0, id="midday_check", replace_existing=True)
     scheduler.add_job(
         _intraday_drop_check, "cron",
         day_of_week="mon-fri", hour="9-15", minute="0,30",  # 09:00~15:30 30분 간격
@@ -398,11 +384,11 @@ def start_scheduler():
         replace_existing=True,
         misfire_grace_time=3600,  # 서버 부팅 지연 대비 (일요일 서버 중지 환경)
     )
-    scheduler.add_job(_cleanup_old_data, "cron", hour=18, minute=0, id="cleanup")
+    scheduler.add_job(_cleanup_old_data, "cron", day_of_week="mon-fri", hour=18, minute=0, id="cleanup", replace_existing=True)
 
     # "오를 종목" 피처 검증 — 목표일 이후 매일 체크, 충분하면 1회 자동 분석·발송
     scheduler.add_job(
-        _feature_validation_check, "cron", hour=18, minute=35,
+        _feature_validation_check, "cron", day_of_week="mon-fri", hour=18, minute=35,
         id="feature_validation_check", replace_existing=True, misfire_grace_time=3600,
     )
     # 오를 종목 후보 픽커 — 평일 스캔(08:10) 후 검증 신호 있으면 자동 발송
@@ -411,17 +397,17 @@ def start_scheduler():
         id="stock_picker_run", replace_existing=True, misfire_grace_time=600,
     )
 
-    # ── v3 Phase 3: 테마 알림 D+30/60/90 가격 추적 (매일 18:05/15/25) ──
+    # ── v3 Phase 3: 테마 알림 D+30/60/90 가격 추적 (평일 18:05/15/25) ──
     scheduler.add_job(
-        _track_alert_returns_30d, "cron", hour=18, minute=5,
+        _track_alert_returns_30d, "cron", day_of_week="mon-fri", hour=18, minute=5,
         id="theme_alert_returns_30d", replace_existing=True, misfire_grace_time=3600,
     )
     scheduler.add_job(
-        _track_alert_returns_60d, "cron", hour=18, minute=15,
+        _track_alert_returns_60d, "cron", day_of_week="mon-fri", hour=18, minute=15,
         id="theme_alert_returns_60d", replace_existing=True, misfire_grace_time=3600,
     )
     scheduler.add_job(
-        _track_alert_returns_90d, "cron", hour=18, minute=25,
+        _track_alert_returns_90d, "cron", day_of_week="mon-fri", hour=18, minute=25,
         id="theme_alert_returns_90d", replace_existing=True, misfire_grace_time=3600,
     )
     # ── v3 Phase 4: 월간 리포트 (매월 1일 09:10) ──
@@ -430,16 +416,9 @@ def start_scheduler():
         id="theme_alert_monthly_report", replace_existing=True, misfire_grace_time=3600 * 24,
     )
 
-    # ── 평일 19:00 서버 자동 종료 ──
-    scheduler.add_job(
-        _weekday_shutdown, "cron",
-        day_of_week="mon-fri", hour=19, minute=0,
-        id="weekday_shutdown", replace_existing=True, misfire_grace_time=300,
-    )
-
     scheduler.start()
     logger.info(
-        "스케줄러 시작: %02d:%02d 브리프 | 평일 %02d:%02d 미국시장 | 12:00 점심체크 | 평일 09:00~15:30 급락체크(30분) | 16:30 일일리포트 | 평일 08:10 일일테마스캔 | 일 09:00 테마발굴 | 18:00 정리 | 평일 19:00 종료",
+        "스케줄러 시작: %02d:%02d 브리프 | 평일 %02d:%02d 미국시장 | 12:00 점심체크 | 평일 09:00~15:30 급락체크(30분) | 16:30 일일리포트 | 평일 08:10 일일테마스캔 | 일 09:00 테마발굴 | 18:00 정리",
         hour, settings.brief_send_minute,
         settings.us_market_send_hour, settings.us_market_send_minute,
     )
