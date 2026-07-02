@@ -242,20 +242,17 @@ async def _handle_theme_list() -> str:
 
 async def _handle_theme_scan() -> str:
     """/theme-scan — 수동 즉시 스캔"""
-    await telegram_service.send_text("🔍 테마 스캔 시작... (시간이 걸릴 수 있습니다)")
+    await telegram_service.send_text("🔍 테마 스캔 시작")
 
     results = await theme_radar_service.scan_all_themes()
     total_new = sum(results.values())
 
-    if total_new == 0:
-        return "✅ 스캔 완료 — 새로운 수혜주 후보 없음"
-
-    lines = [f"✅ 스캔 완료 — 총 {total_new}종목 신규 감지", ""]
-    for theme_name, count in results.items():
-        if count > 0:
-            lines.append(f"• {theme_name}: {count}종목")
-
-    return "\n".join(lines)
+    hit_lines = [
+        f"• {telegram_service.escape_html(name)}: {count}건"
+        for name, count in results.items() if count
+    ]
+    detail = "\n" + "\n".join(hit_lines) if hit_lines else ""
+    return f"✅ 테마 스캔 완료 — 신규 감지 {total_new}건{detail}"
 
 
 async def _handle_theme_discover(args: str) -> str:
