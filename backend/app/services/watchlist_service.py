@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 from sqlalchemy import delete, select
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors import dart_collector, news_collector, price_collector
 from app.models.watchlist import Watchlist
+from app.utils.timezone import now_kst_naive
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ async def add(session: AsyncSession, stock_code: str, stock_name: str, memo: str
         stock_code=stock_code,
         stock_name=stock_name,
         memo=memo,
-        created_at=datetime.now(),
+        created_at=now_kst_naive(),
     )
     session.add(item)
     await session.commit()
@@ -74,6 +75,77 @@ async def _get_stock_price(
 ) -> dict[str, Any] | None:
     """FDR 동기 호출을 스레드풀로 실행"""
     return await asyncio.to_thread(_get_stock_price_sync, stock_code, target_date)
+
+
+async def detect_price_drops(
+    session: AsyncSession, threshold_pct: float = -5.0
+) -> list[dict[str, Any]]:
+    """전일 대비 threshold_pct% 이상 급락한 관심종목 + 뉴스/공시 컨텍스트 반환.
+
+    가격을 먼저 일괄 조회해 급락 종목만 추린 뒤, 그 종목에 대해서만
+    뉴스/공시를 수집한다 (장중 폴링 시 전 종목 뉴스 조회 낭비 방지).
+    """
+    items = await list_all(session)
+    if not items:
+        return []
+
+    # 1. 시세 일괄 병렬 조회
+    price_results = await asyncio.gather(
+        *[_get_stock_price(w.stock_code) for w in items],
+        return_exceptions=True,
+    )
+
+    # 2. 급락 종목만 선별
+    dropped: list[tuple[Watchlist, dict[str, Any]]] = []
+    for w, price in zip(items, price_results):
+        if isinstance(price, Exception) or not price:
+            continue
+        if price["change_pct"] <= threshold_pct:
+            dropped.append((w, price))
+
+    if not dropped:
+        return []
+
+    # 3. 급락 종목에 한해서만 뉴스/공시 수집
+    all_disclosures = await dart_collector.get_today_disclosures()
+
+    results: list[dict[str, Any]] = []
+    for w, price in dropped:
+        try:
+            news = await news_collector._fetch_naver_news(w.stock_name, display=10)
+            filtered = [n for n in news if w.stock_name in n["title"]]
+            if not filtered:
+                filtered = [n for n in news if w.stock_code in n["title"]]
+            news_list = [
+                {"title": n["title"], "link": n.get("link", "")}
+                for n in filtered[:5]
+            ]
+        except Exception:
+            news_list = []
+
+        matched = [
+            d for d in all_disclosures
+            if d.get("stock_code") == w.stock_code
+            or (w.stock_name and w.stock_name in d.get("corp_name", ""))
+        ]
+        disc_list = [
+            {"title": d["title"], "importance": d["importance"]}
+            for d in matched[:5]
+        ]
+
+        results.append({
+            "stock_code": w.stock_code,
+            "stock_name": w.stock_name,
+            "price": price,
+            "news": news_list,
+            "disclosures": disc_list,
+        })
+        logger.info(
+            "급락 감지: %s (%.1f%%) — 뉴스 %d건, 공시 %d건",
+            w.stock_name, price["change_pct"], len(news_list), len(disc_list),
+        )
+
+    return results
 
 
 async def check_watchlist(

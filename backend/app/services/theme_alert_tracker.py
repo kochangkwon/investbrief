@@ -15,6 +15,7 @@ from sqlalchemy import and_, select
 from app.collectors import price_collector
 from app.database import async_session
 from app.models.theme_alert import ThemeAlert, ThemeAlertCandidate
+from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ async def update_alert_returns_for_target(target_n: int) -> int:
     """
     price_col, return_col, kospi_return_col = _column_names(target_n)
 
-    today = date.today()
+    today = today_kst()
     cutoff = today - timedelta(days=target_n)
     cutoff_dt = datetime.combine(cutoff, datetime.min.time())
 

@@ -119,6 +119,18 @@ MACRO_INDICATORS = {
         "alert_threshold": 0.5,
         "format": "{value:.2f}",
     },
+    "KRW=X": {
+        "name": "원달러 환율",
+        "category": "환율",
+        "implication_up": "원화 약세 → 수출주(자동차/조선/반도체) 호재, 외인 매도 압력",
+        "implication_down": "원화 강세 → 수입·내수주 유리, 외인 매수 우호",
+        "alert_threshold": 0.5,
+        "format": "{value:.2f}원",
+        "warning_levels": {
+            1400: "외인 매도 압력 구간",
+            1450: "수출주 부담 심화 — 매크로 리스크",
+        },
+    },
     "^TNX": {
         "name": "미국 10년물 금리",
         "category": "금리",

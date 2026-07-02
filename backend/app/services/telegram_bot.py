@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date
 from typing import Any
 
 import httpx
@@ -13,6 +12,7 @@ from app.config import settings
 from app.database import async_session
 from app.services import brief_service, daily_report_service, theme_discovery_service, theme_radar_service, watchlist_service, telegram_service
 from app.collectors import news_collector, dart_collector, stock_search
+from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +35,14 @@ HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 /theme-list — 테마 목록
 /theme-scan — 즉시 스캔 (수동)
 
-매주 월 08:00 자동 스캔 → 신규 수혜주 텔레그램 알림
+평일 매일 08:10 자동 스캔 → 신규 수혜주 텔레그램 알림
 
 <b>🔍 아카이브 테마 발굴</b>
-/theme-discover [일수] — AI가 부상 테마 자동 발굴 (기본 30일)
+/theme-discover [일수] — AI가 부상 테마 발굴 (기본 30일)
 /theme-trending — 언급 빈도 TOP 10 종목
 
 매주 월요일 07:45 자동 발굴 리포트 전송
+(발굴 테마는 후보 제안 → /theme-add 복사 전송으로 승인 등록)
 
 /help — 도움말"""
 
@@ -64,7 +65,7 @@ async def _get_updates(offset: int) -> list[dict[str, Any]]:
 async def _handle_today() -> str:
     """오늘 브리프 조회"""
     async with async_session() as session:
-        brief = await brief_service.get_brief_by_date(session, date.today())
+        brief = await brief_service.get_brief_by_date(session, today_kst())
     if not brief:
         return "오늘의 브리프가 아직 생성되지 않았습니다.\n07:00에 자동 생성됩니다."
     return telegram_service.format_brief(brief)
@@ -241,20 +242,17 @@ async def _handle_theme_list() -> str:
 
 async def _handle_theme_scan() -> str:
     """/theme-scan — 수동 즉시 스캔"""
-    await telegram_service.send_text("🔍 테마 스캔 시작... (시간이 걸릴 수 있습니다)")
+    await telegram_service.send_text("🔍 테마 스캔 시작")
 
     results = await theme_radar_service.scan_all_themes()
     total_new = sum(results.values())
 
-    if total_new == 0:
-        return "✅ 스캔 완료 — 새로운 수혜주 후보 없음"
-
-    lines = [f"✅ 스캔 완료 — 총 {total_new}종목 신규 감지", ""]
-    for theme_name, count in results.items():
-        if count > 0:
-            lines.append(f"• {theme_name}: {count}종목")
-
-    return "\n".join(lines)
+    hit_lines = [
+        f"• {telegram_service.escape_html(name)}: {count}건"
+        for name, count in results.items() if count
+    ]
+    detail = "\n" + "\n".join(hit_lines) if hit_lines else ""
+    return f"✅ 테마 스캔 완료 — 신규 감지 {total_new}건{detail}"
 
 
 async def _handle_theme_discover(args: str) -> str:
@@ -262,8 +260,8 @@ async def _handle_theme_discover(args: str) -> str:
     /theme-discover [일수]
     아카이브에서 부상 테마 자동 발굴. 기본 30일.
 
-    v3: 자동 등록 활성화 — 발굴된 테마는 Theme DB에 즉시 등록되어
-    다음 월요일 08:00 theme_radar 스캔에 포함됨.
+    승인 게이트: 발굴된 테마는 자동 등록하지 않고 /theme-add 명령어로 제안한다.
+    사용자가 명령을 복사-전송해야 등록되어 평일 매일 08:10 theme_radar 스캔에 포함됨.
     """
     days = 30
     if args.strip():
@@ -285,8 +283,8 @@ async def _handle_theme_discover(args: str) -> str:
     if "error" in result:
         return f"❌ {result['error']}"
 
-    # v3: 자동 등록 (수동 실행도 활성화)
-    auto_register_summary = await theme_discovery_service.auto_register_from_analysis(
+    # 승인 게이트: 자동 등록 대신 /theme-add 명령어 제안
+    suggest_summary = await theme_discovery_service.suggest_themes_from_analysis(
         result["analysis"]
     )
 
@@ -294,7 +292,7 @@ async def _handle_theme_discover(args: str) -> str:
         f"🎯 <b>테마 발굴 결과 ({days}일)</b>\n"
         f"뉴스 {result['news_count']}건 · 공시 {result['disclosure_count']}건 분석\n\n"
         f"{telegram_service.escape_html(result['analysis'])}"
-        f"{auto_register_summary}"
+        f"{suggest_summary}"
     )
 
     await telegram_service.send_long_text(message)

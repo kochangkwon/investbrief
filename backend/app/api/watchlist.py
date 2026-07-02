@@ -7,11 +7,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import verify_admin_api_key
 from app.collectors import stock_search
 from app.database import get_session
 from app.services import watchlist_service
 
-router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+router = APIRouter(
+    prefix="/api/watchlist",
+    tags=["watchlist"],
+    dependencies=[Depends(verify_admin_api_key)],
+)
 
 
 class WatchlistCreate(BaseModel):

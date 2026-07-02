@@ -10,5 +10,15 @@ node_modules/
 # 백업 파일 (절대 커밋 금지)
 *.bak
 *.backup
+*.backup_*
+*.db.backup*
+*.py.backup*
 .env.backup
 .env.bak
+
+# 로컬 환경변수 시크릿 (절대 커밋 금지)
+.env.local
+*.env.local
+
+# OS 잡파일
+.DS_Store

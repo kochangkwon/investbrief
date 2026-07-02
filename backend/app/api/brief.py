@@ -9,15 +9,21 @@ from fastapi import APIRouter, Depends, HTTPException
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.auth import verify_admin_api_key
 from app.database import get_session
 from app.services import brief_service, telegram_service
+from app.utils.timezone import today_kst
 
-router = APIRouter(prefix="/api/brief", tags=["brief"])
+router = APIRouter(
+    prefix="/api/brief",
+    tags=["brief"],
+    dependencies=[Depends(verify_admin_api_key)],
+)
 
 
 @router.get("/today")
 async def get_today_brief(session: AsyncSession = Depends(get_session)):
-    brief = await brief_service.get_brief_by_date(session, date.today())
+    brief = await brief_service.get_brief_by_date(session, today_kst())
     if not brief:
         raise HTTPException(status_code=404, detail="오늘의 브리프가 아직 생성되지 않았습니다")
     return brief
@@ -47,7 +53,7 @@ async def generate_brief(
     - target_date: 백필할 날짜 (미지정 시 오늘)
     - send: 텔레그램 발송 여부 (백필 시 false 권장)
     """
-    brief_date = target_date or date.today()
+    brief_date = target_date or today_kst()
     existing = await brief_service.get_brief_by_date(session, brief_date)
     if existing:
         await session.delete(existing)

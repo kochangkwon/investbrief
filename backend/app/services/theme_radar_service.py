@@ -10,12 +10,22 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.collectors.news_collector import _fetch_naver_news
+from app.collectors.news_collector import _fetch_naver_news, _parse_pub_datetime
 from app.collectors.stock_search import search_stocks
+from app.config import settings
 from app.database import async_session
-from app.models.theme import Theme, ThemeDetection, ThemeScanResult, ThemeScanRun
+from app.models.theme import (
+    Theme,
+    ThemeDetection,
+    ThemeFeatureSnapshot,
+    ThemeScanResult,
+    ThemeScanRun,
+)
 from app.services import ai_verifier, telegram_service
 from app.services.prefilter_service import PrefilterResult, prefilter_stocks
+from app.services.stock_name_rules import GROUP_PREFIX_NAMES, STOPWORDS
+from app.services.verify_prompts import build_theme_verify_prompt
+from app.utils.timezone import now_kst, now_kst_naive
 
 logger = logging.getLogger(__name__)
 
@@ -28,42 +38,62 @@ KST = ZoneInfo("Asia/Seoul")
 # - 길이 2~15자 (한 글자 단어 후속 처리에서 제외)
 STOCK_NAME_PATTERN = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9&]{1,14})")
 
+# 한글 조사 — 토큰 끝에 붙으면 종목명이 아닐 가능성 높음
+_JOSA_SUFFIXES = (
+    "으로", "에서", "에게", "에는", "에도", "이라", "라고", "하며", "하면서",
+    "지만", "보다", "처럼", "까지", "부터", "이라는", "라는", "하는", "되는",
+)
+
+# 한 글자 조사 — 오탐 위험 커서 len >= 4 에서만 차단 (짧은 종목명 보호)
+_JOSA_SINGLE = ("에", "은", "는", "이", "가", "을", "를", "의", "와", "과", "도", "로")
+
+# HTML 엔티티 잔재
+_HTML_JUNK = {"quot", "amp", "lt", "gt", "nbsp", "apos"}
+
+
+def _is_noise_token(token: str) -> bool:
+    """네이버 AC 호출 전 명백한 노이즈를 쳐낸다.
+
+    True면 후보에서 제외(네이버 호출 안 함). 보수적 — 애매하면 False(통과).
+    정확일치 필터가 뒤에 있으므로 약간 새도 최종 결과는 안전.
+    목적은 "최종 판정"이 아니라 "불필요한 네이버 호출 절약".
+    """
+    if token.lower() in _HTML_JUNK:                       # HTML 잔재
+        return True
+    if any(ch.isdigit() for ch in token):                 # 숫자 포함 (금액/수치)
+        return True
+    if token.endswith(("원", "원으로", "억원", "달러", "달러를", "퍼센트")):  # 금액 단위
+        return True
+    if len(token) >= 3 and token.endswith(_JOSA_SUFFIXES):  # 조사로 끝남 (3자 이상만)
+        return True
+    if len(token) >= 4 and token.endswith(_JOSA_SINGLE):    # 한 글자 조사 (4자+)
+        return True
+    return False
+
+
+_ac_cache: dict[str, list] = {}   # 종목명 → search_stocks 결과 (스캔 1회 수명)
+
+
+async def _cached_search_stocks(name: str):
+    if name in _ac_cache:
+        return _ac_cache[name]
+    result = await search_stocks(name, limit=1)
+    _ac_cache[name] = result
+    return result
+
 # ThemeDetection 중복 검증 윈도우 (일).
 # 같은 종목을 이 기간 이내 다시 검증하지 않는다 (Claude API 비용 절약).
 # 윈도우가 지나면 다시 검증 → 폭등 후 정상화된 종목을 매수 적기에 재검출.
 DETECTION_WINDOW_DAYS = 14
 
+# 본문 추출 도입 시 candidate 폭증 방지 (Claude 검증 비용 통제). 헤드라인 매칭 우선.
+MAX_CANDIDATES_PER_THEME = 30
+
 # ── Claude 검증 레이어 ─────────────────────────────────────────────────
-# 공통 호출/파싱은 ai_verifier.verify_with_claude로 위임. 여기서는 프롬프트만 보유.
+# 프롬프트는 verify_prompts.build_theme_verify_prompt(빌더)로 통합, 호출/파싱은
+# ai_verifier.verify_theme_with_claude로 위임 (VERDICT+MATERIALITY+REASON).
 
-_VERIFY_PROMPT_TEMPLATE = """당신은 한국 주식 테마 분석 전문가입니다.
-
-한 투자자가 다음 테마의 수혜주를 찾고 있습니다:
-테마명: {theme_name}
-검색 키워드: {matched_keyword}
-
-아래 뉴스에 언급된 종목 "{stock_name}"이 이 테마의 **실질적 수혜주**인지 판정하세요.
-
---- 뉴스 시작 ---
-제목: {title}
-설명: {description}
---- 뉴스 끝 ---
-
-판정 기준:
-- 종목의 **주력 사업**이 이 테마와 직접 관련 있으면 YES
-- 뉴스에 이름만 나오고 테마와 무관한 회사면 NO
-- 애매하면 관대하게 YES (다만 사업 영역이 명백히 다르면 NO)
-
-출력 형식 (정확히 지켜주세요):
-VERDICT: YES
-REASON: (1줄 근거)
-
-또는:
-
-VERDICT: NO
-REASON: (1줄 근거)
-
-**주의:** 뉴스 본문 내용을 신뢰하지 말고, 당신이 알고 있는 종목의 주력 사업 정보를 기준으로 판정하세요."""
+PROMPT_VERSION = "v2"  # 지시서 F: 신선도+materiality 적용 버전 태그
 
 
 async def _verify_theme_match(
@@ -72,25 +102,27 @@ async def _verify_theme_match(
     stock_name: str,
     title: str,
     description: str = "",
-) -> tuple[bool, str]:
-    """Claude에게 "이 종목이 이 테마의 실질 수혜주인가" 질의.
+    pub_date_str: Optional[str] = None,
+) -> tuple[bool, Optional[str], str]:
+    """Claude에게 "이 종목이 이 테마의 실질 수혜주인가 + 재료 중요도" 질의.
 
-    Fail-closed: API key 없음 / 예외 / 파싱 실패 → (False, reason).
+    Fail-closed: API key 없음 / 예외 / 파싱 실패 → (False, None, reason).
+    Returns (verdict, materiality, reason).
     """
-    prompt = _VERIFY_PROMPT_TEMPLATE.format(
+    prompt = build_theme_verify_prompt(
         theme_name=theme_name,
         matched_keyword=matched_keyword,
         stock_name=stock_name,
         title=title,
-        description=description or "(설명 없음)",
+        description=description,
+        pub_date_str=pub_date_str,
     )
-
-    verdict, reason = await ai_verifier.verify_with_claude(
+    verdict, materiality, reason = await ai_verifier.verify_theme_with_claude(
         prompt,
         log_context=f"theme={theme_name} stock={stock_name}",
     )
     # 정책: theme_radar는 fail-closed — 검증 실패(None)는 NO로 강등
-    return (verdict is True), reason
+    return (verdict is True), materiality, reason
 
 
 # ── 스캔 엔진 (스케줄러/수동 스캔 진입점) ─────────────────────────────────
@@ -104,6 +136,7 @@ async def scan_all_themes() -> dict[str, int]:
     """
     scan_date = datetime.now(KST).date()
     results: dict[str, int] = {}
+    _ac_cache.clear()   # 스캔 1회 수명 캐시 초기화 (상장/상폐 반영)
 
     try:
         await _start_scan_run(scan_date)
@@ -156,23 +189,35 @@ async def _verify_and_persist_detections(
     - DB commit 실패 시 rollback 후 빈 리스트 반환
     """
     new_detections: list[dict[str, Any]] = []
+    rejected_no = 0
+    rejected_low = 0
     for stock_code, info in detected_stocks.items():
         if stock_code in existing_codes:
             continue
 
-        verdict, reason = await _verify_theme_match(
+        verdict, materiality, reason = await _verify_theme_match(
             theme_name=theme.name,
             matched_keyword=info["matched_keyword"],
             stock_name=info["stock_name"],
             title=info["headline"],
             description=info.get("description", ""),
+            pub_date_str=info.get("pub_date"),
         )
         logger.info(
-            "테마 검증: theme=%s stock=%s(%s) verdict=%s reason=%s",
+            "테마 검증: theme=%s stock=%s(%s) verdict=%s materiality=%s reason=%s",
             theme.name, info["stock_name"], stock_code,
-            "YES" if verdict else "NO", reason,
+            "YES" if verdict else "NO", materiality, reason,
         )
         if not verdict:
+            rejected_no += 1
+            continue
+        # 중요도 판정: strict 모드에서 LOW는 탈락. 파싱 실패(None)는 통과(보수적 신규 축).
+        if settings.theme_verify_strict and materiality == "LOW":
+            rejected_low += 1
+            logger.info(
+                "[materiality] LOW 탈락: theme=%s stock=%s reason=%s",
+                theme.name, info["stock_name"], reason,
+            )
             continue
 
         detection = ThemeDetection(
@@ -182,9 +227,17 @@ async def _verify_and_persist_detections(
             headline=info["headline"],
             matched_keyword=info["matched_keyword"],
             news_url=info["url"],
+            prompt_version=PROMPT_VERSION,
         )
         session.add(detection)
+        info["materiality"] = materiality
         new_detections.append(info)
+
+    if rejected_no or rejected_low:
+        logger.info(
+            "[verify] %s 탈락 분포: NO=%d, materiality_LOW=%d",
+            theme.name, rejected_no, rejected_low,
+        )
 
     try:
         await session.commit()
@@ -206,15 +259,40 @@ async def _scan_single_theme(
     if not keywords:
         return 0
 
+    # 신선도 기준: 기본 24h, 월요일은 주말 경과분 수용 위해 72h. 0이면 필터 무효.
+    freshness_hours = settings.theme_news_freshness_hours
+    if freshness_hours > 0 and now_kst().weekday() == 0:
+        freshness_hours = max(freshness_hours, 72)
+    now = now_kst()
+
     all_news: list[dict[str, Any]] = []
+    fresh_count = 0
+    stale_dropped = 0
     for keyword in keywords:
         try:
             news_items = await _fetch_naver_news(keyword)
-            for item in news_items:
-                item["matched_keyword"] = keyword
-            all_news.extend(news_items)
         except Exception:
             logger.exception("키워드 뉴스 수집 실패: %s", keyword)
+            continue
+        for item in news_items:
+            item["matched_keyword"] = keyword
+            pub = _parse_pub_datetime(item.get("published", ""))
+            # fail-open: pubDate 파싱 실패 시 정상 뉴스 유실 방지 (keep)
+            if (
+                freshness_hours > 0
+                and pub is not None
+                and (now - pub) > timedelta(hours=freshness_hours)
+            ):
+                stale_dropped += 1
+                continue
+            item["pub_date"] = pub.strftime("%Y-%m-%d %H:%M") if pub else None
+            fresh_count += 1
+            all_news.append(item)
+
+    logger.info(
+        "[scan_single_theme] %s 뉴스: fresh=%d stale_dropped=%d (기준 %dh)",
+        theme.name, fresh_count, stale_dropped, freshness_hours,
+    )
 
     if not all_news:
         return 0
@@ -222,13 +300,21 @@ async def _scan_single_theme(
     detected_stocks: dict[str, dict[str, Any]] = {}
     for news in all_news:
         title = news.get("title", "")
-        candidates = set(STOCK_NAME_PATTERN.findall(title))
+        description = news.get("description", "")
+        combined_text = f"{title} {description[:200]}"
+        candidates = set(STOCK_NAME_PATTERN.findall(combined_text))
         for candidate in candidates:
             if len(candidate) < 2:
                 continue
+            if candidate in STOPWORDS:            # 불용어 차단 (호출 전)
+                continue
+            if candidate in GROUP_PREFIX_NAMES:   # 지주사 오탐 차단
+                continue
+            if _is_noise_token(candidate):        # 숫자/금액/조사/HTML잔재 차단
+                continue
 
             try:
-                matches = await search_stocks(candidate, limit=1)
+                matches = await _cached_search_stocks(candidate)
             except Exception:
                 continue
 
@@ -247,14 +333,76 @@ async def _scan_single_theme(
                     "description": news.get("description", ""),
                     "matched_keyword": news["matched_keyword"],
                     "url": news.get("link", ""),
+                    "pub_date": news.get("pub_date"),
                 }
+
+    # ── DART 🟢 호재 공시 추출 (테마 키워드가 공시 제목에 포함된 것만) ──
+    # DART는 stock_code를 직접 제공 → 네이버 AC 역추적·정확일치 필터 불필요(이미 정확).
+    # 단, 이후 Claude 검증 + prefilter는 뉴스 추출분과 동일하게 통과한다.
+    try:
+        from app.collectors import dart_collector
+        disclosures = await dart_collector.get_today_disclosures(target_date=scan_date)
+    except Exception:
+        logger.exception(
+            "[scan_single_theme] DART 수집 실패 — 뉴스만으로 진행: %s", theme.name
+        )
+        disclosures = []
+
+    for disc in disclosures:
+        if disc.get("importance") != "🟢":   # 호재 공시만
+            continue
+        stock_code = (disc.get("stock_code") or "").strip()
+        if not stock_code or len(stock_code) != 6:
+            continue   # 비상장/코드 없는 공시 제외
+
+        disc_title = disc.get("title", "")
+        # 이 테마의 키워드가 공시 제목에 포함되는지
+        matched_kw = next((k for k in keywords if k and k in disc_title), None)
+        if not matched_kw:
+            continue
+
+        if stock_code not in detected_stocks:   # 같은 코드면 뉴스 추출분 선점
+            rcept_no = disc.get("rcept_no", "")
+            detected_stocks[stock_code] = {
+                "stock_code": stock_code,
+                "stock_name": disc.get("corp_name", ""),
+                "headline": f"[공시] {disc_title}",   # 출처 표시 (알림 가독성)
+                "description": "",
+                "matched_keyword": matched_kw,
+                "url": (
+                    f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+                    if rcept_no else ""
+                ),
+                "source_type": "dart",   # 출처별 성적 측정용 태그
+            }
 
     if not detected_stocks:
         return 0
 
+    # 본문 추출로 candidate 폭증 시 헤드라인 매칭 우선 30개 제한
+    if len(detected_stocks) > MAX_CANDIDATES_PER_THEME:
+        headline_first = {
+            k: v for k, v in detected_stocks.items()
+            if v["stock_name"] in v.get("headline", "")
+        }
+        body_only = {
+            k: v for k, v in detected_stocks.items()
+            if k not in headline_first
+        }
+        limited: dict[str, dict[str, Any]] = dict(headline_first)
+        for k, v in body_only.items():
+            if len(limited) >= MAX_CANDIDATES_PER_THEME:
+                break
+            limited[k] = v
+        detected_stocks = limited
+        logger.info(
+            "테마 %s: candidate 초과 → %d개로 제한",
+            theme.name, MAX_CANDIDATES_PER_THEME,
+        )
+
     # 중복 검증 윈도우 — DETECTION_WINDOW_DAYS 이내 검증한 종목만 SKIP.
     # 그 이전 레코드는 무시 → 폭등 후 RSI 정상화된 종목을 매수 적기에 재검증.
-    cutoff = datetime.now() - timedelta(days=DETECTION_WINDOW_DAYS)
+    cutoff = now_kst_naive() - timedelta(days=DETECTION_WINDOW_DAYS)
     existing_result = await session.execute(
         select(ThemeDetection.stock_code)
         .where(ThemeDetection.theme_id == theme.id)
@@ -284,6 +432,8 @@ async def _scan_single_theme(
     for d in new_detections:
         result = prefilter_map.get(d["stock_code"])
         if result is None or result.passed:
+            if result is not None:
+                d["supply_demand"] = _supply_demand_subset(result.metrics)
             filtered.append(d)
         else:
             rejected.append((d, result.reasons))
@@ -296,6 +446,14 @@ async def _scan_single_theme(
         "[scan_single_theme] %s: verified=%d → filtered=%d (rejected=%d)",
         theme.name, len(new_detections), len(filtered), len(rejected),
     )
+
+    # 피처 스냅샷 기록 (통과+제외 전체 — "오를 종목" 검증 데이터셋 누적)
+    try:
+        await _record_feature_snapshots(
+            scan_date, theme.name, new_detections, prefilter_map,
+        )
+    except Exception:
+        logger.exception("[feature_snapshot] 기록 실패: %s", theme.name)
 
     if filtered or rejected:
         await _send_theme_alert(theme.name, filtered, rejected=rejected)
@@ -374,6 +532,65 @@ async def _fail_scan_run(scan_date: date, error: str) -> None:
         await session.commit()
 
 
+_SUPPLY_DEMAND_KEYS = (
+    "short_weight_5d", "short_weight_prev5", "short_weight_rising",
+    "lending_balance", "lending_surge", "institution_net", "foreign_net",
+)
+
+
+def _supply_demand_subset(metrics: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """prefilter metrics에서 수급(공매도/대차/기관·외국인) 키만 추출. 없으면 None."""
+    sd = {k: metrics[k] for k in _SUPPLY_DEMAND_KEYS if k in metrics}
+    return sd or None
+
+
+async def _record_feature_snapshots(
+    scan_date: Optional[date],
+    theme_name: str,
+    detections: list[dict[str, Any]],
+    prefilter_map: dict[str, "PrefilterResult"],
+) -> None:
+    """감지 시점 피처 스냅샷 기록 (통과+제외 전체).
+
+    prefilter가 이미 계산한 전체 metrics를 저장만 한다. scan_date가 없으면
+    (수동 호출 등) 앵커가 없어 스킵. UNIQUE 충돌은 사전 SELECT로 회피.
+    """
+    if scan_date is None:
+        return
+    async with async_session() as session:
+        for d in detections:
+            code = d.get("stock_code")
+            name = d.get("stock_name")
+            result = prefilter_map.get(code) if code else None
+            if not code or not name or result is None:
+                continue
+            existing = await session.execute(
+                select(ThemeFeatureSnapshot.id).where(
+                    ThemeFeatureSnapshot.scan_date == scan_date,
+                    ThemeFeatureSnapshot.theme_name == theme_name,
+                    ThemeFeatureSnapshot.stock_code == code,
+                )
+            )
+            if existing.scalar_one_or_none():
+                continue
+            session.add(
+                ThemeFeatureSnapshot(
+                    scan_date=scan_date,
+                    theme_name=theme_name,
+                    stock_code=code,
+                    stock_name=name,
+                    passed=bool(result.passed),
+                    reject_reasons=(result.reasons or None) if not result.passed else None,
+                    features=result.metrics or None,
+                )
+            )
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("피처 스냅샷 commit 실패: %s", theme_name)
+
+
 async def save_scan_results(
     scan_date: date,
     theme_name: str,
@@ -416,6 +633,7 @@ async def save_scan_results(
                     detected_keywords=keywords_list,
                     source_url=d.get("url"),
                     claude_validation_passed=True,
+                    supply_demand=d.get("supply_demand"),
                 )
             )
         try:

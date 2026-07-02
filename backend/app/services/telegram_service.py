@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -90,6 +90,84 @@ def _format_market(data: dict[str, Any], title: str) -> str:
     return "\n".join(lines)
 
 
+def _format_risk_header(market_risk: dict[str, Any]) -> str:
+    """P0-5 위험 모드 헤더 (1줄)."""
+    if not market_risk:
+        return ""
+    level = market_risk.get("level", "정상")
+    factors = market_risk.get("factors", [])
+
+    emoji_map = {"정상": "🟢", "주의": "🟠", "위험": "🔴"}
+    emoji = emoji_map.get(level, "⚪")
+
+    if level == "정상":
+        return f"{emoji} <b>시장 위험 모드: 정상</b>"
+
+    factor_str = "; ".join(factors[:2])
+    return (
+        f"{emoji} <b>시장 위험 모드: {level}</b>\n"
+        f"<i>{escape_html(factor_str)}</i>"
+    )
+
+
+def _format_flow_section(flow: dict[str, Any]) -> str:
+    """수급 데이터 텔레그램 포맷."""
+    if not flow:
+        return ""
+
+    lines = ["<b>💰 수급 (전일)</b>"]
+
+    foreign = flow.get("foreign_net_billion")
+    inst = flow.get("institution_net_billion")
+    retail = flow.get("retail_net_billion")
+
+    def _fmt(label: str, val: Optional[float]) -> str:
+        if val is None:
+            return f"  {label}: 데이터 없음"
+        emoji = "🟢" if val > 0 else "🔴" if val < 0 else "⚪"
+        sign = "+" if val > 0 else ""
+        return f"  {emoji} {label}: {sign}{val:,.0f}억"
+
+    lines.append(_fmt("외국인", foreign))
+    lines.append(_fmt("기관", inst))
+    if retail is not None:
+        lines.append(_fmt("개인", retail))
+
+    buy_sectors = flow.get("top_buy_sectors", [])
+    sell_sectors = flow.get("top_sell_sectors", [])
+    if buy_sectors:
+        lines.append(f"  외인 매수 우위: {', '.join(buy_sectors[:3])}")
+    if sell_sectors:
+        lines.append(f"  외인 매도 우위: {', '.join(sell_sectors[:3])}")
+
+    # 외인 매수 TOP 5
+    top_traders = flow.get("top_foreign_traders", [])
+    buys = [t for t in top_traders if t["net_billion"] > 0][:5]
+    if buys:
+        lines.append("")
+        lines.append("  <b>외인 매수 TOP 5</b>")
+        for b in buys:
+            net = b["net_billion"]
+            lines.append(
+                f"    • {escape_html(b['stock_name'])} ({b['stock_code']}) "
+                f"+{net:,.0f}억"
+            )
+
+    # 외인 매도 TOP 3
+    sells = [t for t in top_traders if t["net_billion"] < 0][:3]
+    if sells:
+        lines.append("")
+        lines.append("  <b>외인 매도 TOP 3</b>")
+        for s in sells:
+            net = s["net_billion"]
+            lines.append(
+                f"    • {escape_html(s['stock_name'])} ({s['stock_code']}) "
+                f"{net:,.0f}억"
+            )
+
+    return "\n".join(lines)
+
+
 def format_brief(brief: Any) -> str:
     """DailyBrief → 텔레그램 메시지."""
     parts = []
@@ -97,6 +175,13 @@ def format_brief(brief: Any) -> str:
     # 헤더
     parts.append(f"☀️ <b>투자 모닝브리프</b> ({brief.date})")
     parts.append("")
+
+    # 시장 위험 모드 (P0-5)
+    risk = getattr(brief, "market_risk", None) or {}
+    risk_section = _format_risk_header(risk)
+    if risk_section:
+        parts.append(risk_section)
+        parts.append("")
 
     # 글로벌 마켓
     gm = _format_market(brief.global_market, "🌍 글로벌 시장")
@@ -114,6 +199,13 @@ def format_brief(brief: Any) -> str:
     parts.append("<b>📰 AI 뉴스 브리핑</b>")
     parts.append(escape_html(brief.news_summary))
     parts.append("")
+
+    # 수급 (P0-2)
+    flow = getattr(brief, "investor_flow", None) or {}
+    flow_section = _format_flow_section(flow)
+    if flow_section:
+        parts.append(flow_section)
+        parts.append("")
 
     # DART 공시 (중요한 것만)
     disclosures = brief.disclosures or []
