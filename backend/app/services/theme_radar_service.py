@@ -712,6 +712,7 @@ async def _send_theme_alert(
                 db=db,
                 use_inline_buttons=False,
                 skip_telegram=True,  # 위에서 이미 발송함 — 이중 발송 방지
+                prompt_version=PROMPT_VERSION,  # 지시서 F-패치: 버전 태깅
             )
         if alert_uid:
             logger.info("v3 측정 인프라 기록 완료: %s", alert_uid)

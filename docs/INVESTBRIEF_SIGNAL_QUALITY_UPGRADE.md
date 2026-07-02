@@ -172,3 +172,10 @@ for item in news_items:
 - [ ] 30/60/90일 추적 리포트가 v1/v2 분리 집계 제공
 - [ ] StockAI daily_batch가 변경 후에도 무수정으로 정상 동작 (0건 포함)
 - [ ] 운영 2주 후: 통과 후보 수·탈락 사유 분포·(표본 축적 시) v2 타율을 요약한 관찰 노트 1건 작성
+
+---
+
+## 구현 노트 (2026-07-02, F-패치 정정)
+
+- **radar/discovery 프롬프트 통합은 미적용이 타당** — discovery의 프롬프트는 "종목이 특정 이슈로 시장 주목을 받는가"를 판별하는 **테마 후보 발굴용**이고, radar는 "이 종목이 이 테마의 실질 수혜주인가"를 판정하는 **종목 검증용**으로 용도가 다르다. radar 프롬프트만 `verify_prompts.build_theme_verify_prompt` 빌더로 이관했고 discovery는 자기 프롬프트를 유지한다. 후속 세션은 이 둘을 억지로 통합하지 말 것.
+- **F-패치(prompt_version 분리 집계)**: 수익률 집계 대상은 `ThemeAlertCandidate`이므로 `prompt_version`을 해당 테이블에 추가(지시서 F-패치 §6의 "스키마 변경 없음"은 정정 — ThemeDetection이 아닌 ThemeAlertCandidate에 컬럼 필요). 월간 리포트에 v1/v2 비교 블록 + v2 성숙 30건 미만 유보 표기.

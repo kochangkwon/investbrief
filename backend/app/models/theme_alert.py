@@ -58,6 +58,8 @@ class ThemeAlertCandidate(Base):
     stock_name: Mapped[str] = mapped_column(String(100))
     sub_theme: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     matched_news_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 검증 프롬프트 버전 (지시서 F-패치 효과 측정 — NULL=v1, "v2"=엄격검증)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
 
     # 가격 스냅샷 (알림 발송 시점 종가)
     price_at_alert: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

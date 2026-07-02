@@ -70,6 +70,7 @@ async def send_theme_alert(
     *,
     use_inline_buttons: bool = False,
     skip_telegram: bool = False,
+    prompt_version: Optional[str] = None,
 ) -> Optional[str]:
     """알림 발송 + DB 기록.
 
@@ -128,6 +129,7 @@ async def send_theme_alert(
                 matched_news_title=c.get("matched_news_title"),
                 price_at_alert=c.get("price_at_alert"),
                 kospi_at_alert=kospi_close,
+                prompt_version=prompt_version,
             )
             db.add(cand)
 
