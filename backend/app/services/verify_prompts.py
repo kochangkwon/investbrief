@@ -1,0 +1,67 @@
+"""테마 수혜주 검증 프롬프트 빌더 (지시서 F).
+
+radar 검증 프롬프트를 상수에서 빌더로 이관하고 MATERIALITY(재료 중요도) 축과
+발행일(신선도 참고)을 추가한다. discovery의 "시장 주목" 판별은 목적이 다른
+별개 프롬프트이므로 통합 대상이 아니다.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+
+def build_theme_verify_prompt(
+    theme_name: str,
+    matched_keyword: str,
+    stock_name: str,
+    title: str,
+    description: str = "",
+    pub_date_str: Optional[str] = None,
+) -> str:
+    """radar 테마 수혜주 검증 프롬프트. VERDICT/MATERIALITY/REASON 응답 유도."""
+    pub_line = f"발행일: {pub_date_str}\n" if pub_date_str else ""
+    return f"""당신은 한국 주식 테마 분석 전문가입니다. 이 판정 결과는 자동매매 시스템의 매수 후보 입력으로 사용되므로, 오탐(false positive)의 비용이 매우 큽니다.
+
+한 투자자가 다음 테마의 수혜주를 찾고 있습니다:
+테마명: {theme_name}
+검색 키워드: {matched_keyword}
+
+아래 뉴스에 언급된 종목 "{stock_name}"을 판정하세요.
+
+--- 뉴스 시작 ---
+{pub_line}제목: {title}
+설명: {description or "(설명 없음)"}
+--- 뉴스 끝 ---
+
+다음 **두 조건을 모두** 만족할 때만 YES:
+
+조건 1 — 실질 관련성:
+- 종목의 **주력 사업(매출 비중이 큰 핵심 사업)**이 이 테마와 직접 관련 있어야 함
+- 그룹 지주회사가 계열사 이슈로 언급된 경우는 NO (예: 방산 뉴스의 "한화"는 한화에어로스페이스가 수혜주이지 지주사 한화가 아님)
+- 테마가 **일부 사업부·자회사**에만 해당하면 NO (예: 운송사의 작은 항공우주 부문, 식품사의 소규모 신사업)
+- **비교·예시·업황 설명·간접 연관**으로 언급됐을 뿐이면 NO (예: "유가 상승으로 항공주 영향" 류 거시 연관)
+- 뉴스에 이름만 스쳐 지나가는 경우 NO
+
+조건 2 — 신규 촉매:
+- 이 뉴스가 **구체적인 신규 사건**(수주, 계약, 실적 발표, 정책 결정, 신제품, 투자 유치 등)을 다루고 있어야 함
+- 단순 시황 나열, 업종 동향 일반론, 과거 사건의 반복 언급, "관련주 정리" 류 기사는 NO
+- 발행일이 오래된(이미 시장에 소화된) 재료면 신중히 — 새 재료가 아니면 NO
+
+**애매하면 NO.** 확신이 없으면 NO.
+
+또한 이 재료의 **중요도(MATERIALITY)**를 판정하세요:
+- HIGH: 본업 매출/이익에 유의미한(규모가 명시되거나 추정 가능한) 영향
+- MEDIUM: 방향성은 있으나 규모가 제한적이거나 시차가 큰 영향
+- LOW: 기대감·간접 수혜·규모 불명·단순 관심 수준
+
+출력 형식 (정확히 지켜주세요):
+VERDICT: YES
+MATERIALITY: HIGH
+REASON: (1줄 근거)
+
+또는:
+
+VERDICT: NO
+MATERIALITY: LOW
+REASON: (1줄 근거)
+
+**주의:** 종목의 주력 사업 판단은 뉴스 본문이 아닌 당신이 알고 있는 정보를 기준으로 하되, "무슨 사건이 발생했는가"는 뉴스 내용을 기준으로 판정하세요."""

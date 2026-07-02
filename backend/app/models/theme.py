@@ -61,6 +61,8 @@ class ThemeDetection(Base):
     headline: Mapped[str] = mapped_column(Text)
     matched_keyword: Mapped[str] = mapped_column(String(100))
     news_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 검증 프롬프트 버전 (지시서 F 효과 측정 — NULL=v1, "v2"=신선도+materiality)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
     detected_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=now_kst_naive, index=True
     )

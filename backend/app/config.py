@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # Finnhub fallback (yfinance rate limit 시 자동 전환)
     finnhub_api_key: str = ""
 
+    # 테마 신호 품질 (지시서 F) — 롤백용 플래그
+    theme_verify_strict: bool = True       # false면 MATERIALITY LOW도 통과(검증 완화)
+    theme_news_freshness_hours: int = 24   # 0이면 신선도 필터 무효
+
     # 키움 REST API (테마 선정 수급 필터 — 공매도/대차/기관·외국인)
     kiwoom_app_key: str = ""
     kiwoom_app_secret: str = ""

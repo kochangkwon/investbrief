@@ -78,14 +78,20 @@ async def _fetch_naver_news(keyword: str, display: int = 10) -> list[dict[str, A
 
 def _parse_pub_date(value: str) -> date | None:
     """RFC 822 / ISO 형식의 pubDate를 date로 변환"""
+    dt = _parse_pub_datetime(value)
+    return dt.date() if dt else None
+
+
+def _parse_pub_datetime(value: str) -> datetime | None:
+    """RFC 822 / ISO 형식의 pubDate를 tz-aware datetime으로 변환 (신선도 필터용)."""
     if not value:
         return None
     try:
-        return parsedate_to_datetime(value).date()
+        return parsedate_to_datetime(value)
     except (TypeError, ValueError):
         pass
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
 
