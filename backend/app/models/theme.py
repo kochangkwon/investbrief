@@ -63,6 +63,9 @@ class ThemeDetection(Base):
     news_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # 검증 프롬프트 버전 (지시서 F 효과 측정 — NULL=v1, "v2"=신선도+materiality)
     prompt_version: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    # 이력 보존형 비활성 플래그 — 제거 키워드/구버전 프롬프트로 매칭된 오탐 감지를
+    # 삭제하지 않고 집계(중복검증 윈도우·은퇴 카운터·테마별 감지 수)에서만 제외.
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     detected_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=now_kst_naive, index=True
     )

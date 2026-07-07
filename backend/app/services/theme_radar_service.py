@@ -407,6 +407,7 @@ async def _scan_single_theme(
         select(ThemeDetection.stock_code)
         .where(ThemeDetection.theme_id == theme.id)
         .where(ThemeDetection.detected_at >= cutoff)
+        .where(ThemeDetection.is_active.is_(True))
     )
     existing_codes = set(existing_result.scalars().all())
 
@@ -762,7 +763,9 @@ async def list_themes(session: AsyncSession) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for t in themes:
         count_result = await session.execute(
-            select(ThemeDetection).where(ThemeDetection.theme_id == t.id)
+            select(ThemeDetection)
+            .where(ThemeDetection.theme_id == t.id)
+            .where(ThemeDetection.is_active.is_(True))
         )
         detected_count = len(list(count_result.scalars().all()))
         output.append({

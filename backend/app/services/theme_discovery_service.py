@@ -648,6 +648,7 @@ async def deactivate_stale_themes(inactive_days: int = 42) -> list[str]:
                 select(ThemeDetection.id)
                 .where(ThemeDetection.theme_id == theme.id)
                 .where(ThemeDetection.detected_at >= cutoff)
+                .where(ThemeDetection.is_active.is_(True))
                 .limit(1)
             )
             if det_result.first() is not None:
