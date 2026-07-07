@@ -84,6 +84,7 @@ async def get_theme_scan_results(
                     select(ThemeScanResult)
                     .where(ThemeScanResult.scan_date == target_date)
                     .where(ThemeScanResult.claude_validation_passed.is_(True))
+                    .where(ThemeScanResult.is_active.is_(True))
                     .order_by(ThemeScanResult.theme_name, ThemeScanResult.stock_code)
                 )
             )
