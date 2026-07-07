@@ -128,6 +128,69 @@ async def _verify_theme_match(
 # ── 스캔 엔진 (스케줄러/수동 스캔 진입점) ─────────────────────────────────
 
 
+def _find_multi_theme_titles(theme_title_map: dict[Any, set[str]]) -> set[str]:
+    """복수 테마에 동시 매칭된 뉴스 제목 집합을 반환.
+
+    동일 뉴스 제목이 2개 이상 테마의 키워드에 걸리면 특정 테마의 고유 재료가
+    아니라 광범위 시황/리포트일 가능성이 높다(예: 삼성증권 대장주 리포트).
+    이런 제목은 전 테마에서 검증 대상에서 제외한다. 순수 함수(테스트 용이).
+    """
+    counts: dict[str, int] = {}
+    for titles in theme_title_map.values():
+        for title in titles:           # 테마별 set → 같은 테마 내 중복은 이미 1회
+            if not title:
+                continue
+            counts[title] = counts.get(title, 0) + 1
+    return {title for title, c in counts.items() if c >= 2}
+
+
+async def _gather_theme_news(theme: Theme) -> list[dict[str, Any]]:
+    """테마 키워드로 신선한 뉴스만 수집 (검증 전 단계 — 교차 테마 가드 입력).
+
+    _scan_single_theme의 뉴스 수집부를 분리한 것. 반환 리스트는 그대로
+    _scan_single_theme에 재사용되므로 스캔 1회당 중복 fetch가 없다.
+    """
+    keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
+    if not keywords:
+        return []
+
+    # 신선도 기준: 기본 24h, 월요일은 주말 경과분 수용 위해 72h. 0이면 필터 무효.
+    freshness_hours = settings.theme_news_freshness_hours
+    if freshness_hours > 0 and now_kst().weekday() == 0:
+        freshness_hours = max(freshness_hours, 72)
+    now = now_kst()
+
+    all_news: list[dict[str, Any]] = []
+    fresh_count = 0
+    stale_dropped = 0
+    for keyword in keywords:
+        try:
+            news_items = await _fetch_naver_news(keyword)
+        except Exception:
+            logger.exception("키워드 뉴스 수집 실패: %s", keyword)
+            continue
+        for item in news_items:
+            item["matched_keyword"] = keyword
+            pub = _parse_pub_datetime(item.get("published", ""))
+            # fail-open: pubDate 파싱 실패 시 정상 뉴스 유실 방지 (keep)
+            if (
+                freshness_hours > 0
+                and pub is not None
+                and (now - pub) > timedelta(hours=freshness_hours)
+            ):
+                stale_dropped += 1
+                continue
+            item["pub_date"] = pub.strftime("%Y-%m-%d %H:%M") if pub else None
+            fresh_count += 1
+            all_news.append(item)
+
+    logger.info(
+        "[scan_single_theme] %s 뉴스: fresh=%d stale_dropped=%d (기준 %dh)",
+        theme.name, fresh_count, stale_dropped, freshness_hours,
+    )
+    return all_news
+
+
 async def scan_all_themes() -> dict[str, int]:
     """전체 활성 테마 스캔. {테마명: 신규감지건수} 반환.
 
@@ -150,11 +213,35 @@ async def scan_all_themes() -> dict[str, int]:
             )
             themes = list(result.scalars().all())
 
+        # ── 교차 테마 가드 ────────────────────────────────────────────
+        # 전 테마 뉴스를 먼저 수집해 복수 테마에 동시 매칭된 제목을 산출하고,
+        # 해당 제목은 모든 테마에서 검증 대상에서 제외한다(광범위 시황/리포트 오탐 차단).
+        theme_news_map: dict[int, list[dict[str, Any]]] = {}
+        for theme in themes:
+            try:
+                theme_news_map[theme.id] = await _gather_theme_news(theme)
+            except Exception:
+                logger.exception("테마 뉴스 수집 실패: %s", theme.name)
+                theme_news_map[theme.id] = []
+        banned_titles = _find_multi_theme_titles({
+            tid: {n.get("title", "") for n in news if n.get("title")}
+            for tid, news in theme_news_map.items()
+        })
+        if banned_titles:
+            logger.info(
+                "[cross_theme_guard] 복수 테마 매칭 제목 %d건 → 전 테마 검증 제외",
+                len(banned_titles),
+            )
+
         total_stocks = 0
         for theme in themes:
             try:
                 async with async_session() as session:
-                    count = await _scan_single_theme(session, theme, scan_date=scan_date)
+                    count = await _scan_single_theme(
+                        session, theme, scan_date=scan_date,
+                        all_news=theme_news_map.get(theme.id),
+                        banned_titles=banned_titles,
+                    )
                 results[theme.name] = count
                 total_stocks += count
             except Exception:
@@ -253,53 +340,28 @@ async def _scan_single_theme(
     session: AsyncSession,
     theme: Theme,
     scan_date: Optional[date] = None,
+    all_news: Optional[list[dict[str, Any]]] = None,
+    banned_titles: Optional[set[str]] = None,
 ) -> int:
-    """단일 테마 스캔 — 신규 감지 종목 수 반환"""
-    keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
-    if not keywords:
-        return 0
+    """단일 테마 스캔 — 신규 감지 종목 수 반환.
 
-    # 신선도 기준: 기본 24h, 월요일은 주말 경과분 수용 위해 72h. 0이면 필터 무효.
-    freshness_hours = settings.theme_news_freshness_hours
-    if freshness_hours > 0 and now_kst().weekday() == 0:
-        freshness_hours = max(freshness_hours, 72)
-    now = now_kst()
-
-    all_news: list[dict[str, Any]] = []
-    fresh_count = 0
-    stale_dropped = 0
-    for keyword in keywords:
-        try:
-            news_items = await _fetch_naver_news(keyword)
-        except Exception:
-            logger.exception("키워드 뉴스 수집 실패: %s", keyword)
-            continue
-        for item in news_items:
-            item["matched_keyword"] = keyword
-            pub = _parse_pub_datetime(item.get("published", ""))
-            # fail-open: pubDate 파싱 실패 시 정상 뉴스 유실 방지 (keep)
-            if (
-                freshness_hours > 0
-                and pub is not None
-                and (now - pub) > timedelta(hours=freshness_hours)
-            ):
-                stale_dropped += 1
-                continue
-            item["pub_date"] = pub.strftime("%Y-%m-%d %H:%M") if pub else None
-            fresh_count += 1
-            all_news.append(item)
-
-    logger.info(
-        "[scan_single_theme] %s 뉴스: fresh=%d stale_dropped=%d (기준 %dh)",
-        theme.name, fresh_count, stale_dropped, freshness_hours,
-    )
+    all_news가 주어지면 재사용(교차 테마 가드 경로), 없으면 자체 수집.
+    banned_titles(복수 테마 동시 매칭 제목)에 속한 뉴스는 검증 대상에서 제외.
+    """
+    if all_news is None:
+        all_news = await _gather_theme_news(theme)
+    banned_titles = banned_titles or set()
 
     if not all_news:
         return 0
 
     detected_stocks: dict[str, dict[str, Any]] = {}
+    banned_skipped = 0
     for news in all_news:
         title = news.get("title", "")
+        if title in banned_titles:   # 복수 테마 매칭 제목 → 전 테마 검증 제외
+            banned_skipped += 1
+            continue
         description = news.get("description", "")
         combined_text = f"{title} {description[:200]}"
         candidates = set(STOCK_NAME_PATTERN.findall(combined_text))
@@ -336,9 +398,16 @@ async def _scan_single_theme(
                     "pub_date": news.get("pub_date"),
                 }
 
+    if banned_skipped:
+        logger.info(
+            "[cross_theme_guard] %s: 복수 테마 매칭 제목 %d건 검증 제외",
+            theme.name, banned_skipped,
+        )
+
     # ── DART 🟢 호재 공시 추출 (테마 키워드가 공시 제목에 포함된 것만) ──
     # DART는 stock_code를 직접 제공 → 네이버 AC 역추적·정확일치 필터 불필요(이미 정확).
     # 단, 이후 Claude 검증 + prefilter는 뉴스 추출분과 동일하게 통과한다.
+    keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
     try:
         from app.collectors import dart_collector
         disclosures = await dart_collector.get_today_disclosures(target_date=scan_date)

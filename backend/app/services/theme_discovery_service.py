@@ -238,8 +238,16 @@ async def discover_themes(days: int = 30) -> dict[str, Any]:
 
     async with async_session() as session:
         archives = await _get_recent_archives(session, days)
-        existing_result = await session.execute(select(Theme.name))
-        existing_themes = list(existing_result.scalars().all())
+        existing_result = await session.execute(select(Theme.name, Theme.keywords))
+        existing_rows = list(existing_result.all())
+        existing_themes = [name for name, _ in existing_rows]
+        # 키워드 4원칙 대조용 — 활성/비활성 무관 전체 테마 키워드를 평탄화
+        existing_keywords = sorted({
+            kw.strip()
+            for _, keywords in existing_rows
+            for kw in (keywords or "").split(",")
+            if kw.strip()
+        })
 
     if not archives:
         return {"error": "분석할 아카이브가 없습니다."}
@@ -285,6 +293,7 @@ async def discover_themes(days: int = 30) -> dict[str, Any]:
         days, news_titles, disclosure_titles, ai_summaries,
         events_text=events_text,
         existing_themes=existing_themes,
+        existing_keywords=existing_keywords,
     )
 
     try:
@@ -323,12 +332,14 @@ def _build_theme_discovery_prompt(
     ai_summaries: list[str],
     events_text: str = "",
     existing_themes: Optional[list[str]] = None,
+    existing_keywords: Optional[list[str]] = None,
 ) -> str:
     """테마 발굴용 Claude 프롬프트 (v2.1 — 9~12개 항목 분석가 리포트).
 
     events_text가 제공되면 카탈리스트 항목에 활용.
     없으면 카탈리스트 항목은 뉴스/공시에서만 추출 시도.
     existing_themes가 제공되면 의미상 중복 테마 재생성을 회피하도록 지시.
+    existing_keywords가 제공되면 키워드 4원칙(§키워드 작성 규칙)의 중복 금지 대조에 사용.
     """
     news_section = "\n".join(news_titles[:600])
     disclosure_section = "\n".join(disclosure_titles[:100])
@@ -340,6 +351,15 @@ def _build_theme_discovery_prompt(
         existing_block = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📚 이미 등록된 테마 (중복 발굴 금지 대상):
 {existing_list}
+
+"""
+
+    existing_kw_block = ""
+    if existing_keywords:
+        existing_kw_list = ", ".join(existing_keywords)
+        existing_kw_block = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔑 기존 테마 키워드 (중복 금지 대조용 — 원칙 4):
+{existing_kw_list}
 
 """
 
@@ -371,7 +391,7 @@ def _build_theme_discovery_prompt(
 🤖 일일 AI 요약:
 {summary_section}
 
-{events_block}{existing_block}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{events_block}{existing_block}{existing_kw_block}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 다음 형식으로 답변하세요:
 
@@ -381,7 +401,7 @@ def _build_theme_discovery_prompt(
 
 **필수 항목** (모든 테마에 작성):
 - **부상 근거**: 왜 이 테마가 주목받는지 (2~3줄)
-- **핵심 키워드**: 해당 테마를 관통하는 키워드 3~5개 (쉼표 구분)
+- **핵심 키워드**: 해당 테마를 관통하는 키워드 3~5개 (쉼표 구분) — 아래 **키워드 작성 4원칙**을 반드시 준수
 - **핵심 드라이버**: 정책 / 기술 / 수요 중 무엇이 추진력인지 (1줄)
 - **밸류체인 위치**: 상류(소재/장비) / 중류(제조) / 하류(서비스/유통) 중 한국 기업이 강한 위치
 - **라이프 스테이지**: 초기 부상 / 가속 성장 / 성숙 / 조정 중 하나 + 1줄 근거
@@ -420,7 +440,14 @@ def _build_theme_discovery_prompt(
 5. **이미 누구나 아는 테마**(예: "반도체 수혜")는 제외. **새롭게 부상 중인** 것 중심.
 5-1. **중복 회피**: 위 "📚 이미 등록된 테마" 목록과 **의미·대상이 겹치는 테마는 발굴하지 말 것**. 이름 표현이 달라도(예: "피지컬AI 로봇 상용화" vs "물리적 AI 로봇 혁명") 같은 대상을 가리키면 중복으로 간주하고 제외. 기존 테마에 없는 **진짜 새로운** 흐름만 제시.
 6. **라이프 스테이지**: 입력 데이터의 언급 빈도, 가격 동향, 정책 단계 등 종합 판단. 일관성을 위해 보수적으로(과대 단계 평가 회피).
-7. 서론/결론 없이 위 형식대로 바로 작성."""
+
+7. **키워드 작성 4원칙** (핵심 키워드는 테마 스캐너가 뉴스 매칭에 그대로 사용하므로 아래를 **모두** 지킬 것):
+   - **원칙 1 — 기업명·인명 금지**: 특정 기업명("한화시스템", "포스코인터")이나 인명("최태원")을 키워드로 쓰지 말 것. 개별 종목이 아니라 테마 전체를 포착하는 개념어를 사용.
+   - **원칙 2 — 수요·원인 단어 금지**: 수요/원인을 가리키는 말("데이터센터", "AI 전력난", "AI인프라")은 금지. 그 수요가 유발하는 **공급·제품·기술 축**(예: "변압기", "HVDC")을 키워드로 삼을 것.
+   - **원칙 3 — 범용어 금지**: 너무 넓어 아무 종목에나 걸리는 말("차세대반도체", "공급망 재편", "소재혁신")은 금지. 테마를 특정하는 구체어를 쓸 것.
+   - **원칙 4 — 기존 키워드 중복 금지**: 위 "🔑 기존 테마 키워드" 목록에 이미 있는 키워드와 **동일하거나 사실상 같은** 키워드는 쓰지 말 것. 신규 테마는 기존과 겹치지 않는 고유 키워드로 구성.
+
+8. 서론/결론 없이 위 형식대로 바로 작성."""
 
 
 # ── AI 응답 파싱 + Theme DB 자동 등록 (권고 1) ─────────────────────────
