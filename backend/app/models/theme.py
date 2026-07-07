@@ -111,6 +111,9 @@ class ThemeScanResult(Base):
     detected_keywords: Mapped[list[Any]] = mapped_column(_JsonList, default=list)
     source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     claude_validation_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 이력 보존형 비활성 플래그 — 정비에서 제거된 키워드로만 매칭된 수혜주를
+    # 삭제하지 않고 Pull 목록에서만 제외 (ThemeDetection.is_active와 동일 패턴).
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     # 종목별 수급 (prefilter F7/F8 측정값 — StockAI 참고용)
     supply_demand: Mapped[Optional[dict[str, Any]]] = mapped_column(
         _JsonList, nullable=True
