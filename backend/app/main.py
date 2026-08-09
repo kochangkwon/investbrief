@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.brief import router as brief_router
 from app.api.health import router as health_router
 from app.api.internal.theme_scan import router as internal_theme_scan_router
+from app.api.risk_flags import router as risk_flags_router
 from app.api.stock import router as stock_router
 from app.api.watchlist import router as watchlist_router
 from app.config import settings
@@ -69,6 +70,7 @@ app.include_router(health_router)
 app.include_router(brief_router)
 app.include_router(watchlist_router)
 app.include_router(stock_router)
+app.include_router(risk_flags_router)
 app.include_router(internal_theme_scan_router)
 
 

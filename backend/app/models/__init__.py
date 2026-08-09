@@ -1,5 +1,6 @@
 from app.models.brief import DailyBrief
 from app.models.fundamental_cache import FundamentalSimple, StockCorpMap
+from app.models.risk_cache import DartApiCache
 from app.models.theme import (
     Theme,
     ThemeDetection,
@@ -20,4 +21,5 @@ __all__ = [
     "ThemeAlertCandidate",
     "FundamentalSimple",
     "StockCorpMap",
+    "DartApiCache",
 ]

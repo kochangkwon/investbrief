@@ -22,3 +22,6 @@ node_modules/
 
 # OS 잡파일
 .DS_Store
+
+# DART corpCode 로컬 캐시 (7일 TTL로 자동 재생성)
+backend/data/dart_corpcode.json

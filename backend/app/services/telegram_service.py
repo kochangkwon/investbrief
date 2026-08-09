@@ -168,6 +168,66 @@ def _format_flow_section(flow: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_FLAG_ICON = {"위험": "🔴", "주의": "🟡"}
+
+# 지표군별 근거 수치 표기 (플래그 + 근거 수치만. 정성 평가 문구 없음)
+_FLAG_METRIC_LABELS = {
+    "A_감가상각절벽": [("cip_ratio", "건설중인자산/유형자산", "ratio"),
+                  ("cip_yoy", "건설중인자산 YoY", "ratio")],
+    "B_이익현금괴리": [("capex_ratio", "CAPEX/OCF", "x"),
+                  ("capex_초과연수", "CAPEX>OCF 연도", "years")],
+    "C_차입리스크": [("net_debt_to_ebitda", "순차입금/EBITDA", "x"),
+                 ("interest_coverage", "이자보상배율", "x"),
+                 ("debt_growth", "차입금 증가율", "ratio")],
+    "D_희석리스크": [("dilution_ratio", "희석률", "ratio"),
+                 ("non_growth_ratio", "비성장자금 비중", "ratio")],
+}
+
+
+def _fmt_metric(value: Any, kind: str) -> str:
+    if value is None:
+        return "판정불가"
+    if kind == "ratio":
+        return f"{value * 100:.1f}%"
+    if kind == "years":
+        return f"{value}개년"
+    return f"{value:.2f}배"
+
+
+def _format_risk_flags(reports: list[dict[str, Any]]) -> str:
+    """재무 리스크 플래그 섹션 — 발동 지표군만, 근거 수치 동반."""
+    if not reports:
+        return ""
+
+    lines = ["<b>⚠️ 재무 리스크 플래그</b> (DART 공시 기반)"]
+    for rep in reports:
+        flags = rep.get("flags") or {}
+        hits = [(name, g) for name, g in flags.items() if g.get("level") in _FLAG_ICON]
+        if not hits:
+            continue
+
+        name = escape_html(rep.get("corp_name") or rep.get("stock_code", ""))
+        unavailable = rep.get("unavailable_count", 0)
+        suffix = f" · 판정불가 {unavailable}건" if unavailable else ""
+        lines.append(f"  <b>{name}</b> ({rep.get('fs_basis', '')}{suffix})")
+
+        for group_name, group in hits:
+            icon = _FLAG_ICON[group["level"]]
+            metrics = group.get("metrics") or {}
+            detail = ", ".join(
+                f"{label} {_fmt_metric(metrics.get(key), kind)}"
+                for key, label, kind in _FLAG_METRIC_LABELS.get(group_name, [])
+                if metrics.get(key) is not None
+            )
+            label = escape_html(group_name.split("_", 1)[-1])
+            lines.append(f"    {icon} {label}: {escape_html(detail)}")
+
+    if len(lines) == 1:
+        return ""
+    lines.append("  <i>공시 데이터 기반 정량 계산. 투자 판단·추천 아님.</i>")
+    return "\n".join(lines)
+
+
 def format_brief(brief: Any) -> str:
     """DailyBrief → 텔레그램 메시지."""
     parts = []
@@ -222,6 +282,12 @@ def format_brief(brief: Any) -> str:
         parts.append("<b>🔍 관심종목 체크</b>")
         for w in watchlist:
             parts.append(f"  • {escape_html(w.get('stock_name', ''))}: {escape_html(w.get('summary', ''))}")
+
+    # 재무 리스크 플래그 (발동 종목만)
+    flag_section = _format_risk_flags(getattr(brief, "risk_flags", None) or [])
+    if flag_section:
+        parts.append("")
+        parts.append(flag_section)
 
     return "\n".join(parts)
 
