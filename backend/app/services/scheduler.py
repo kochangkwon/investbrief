@@ -27,6 +27,24 @@ def _is_weekday() -> bool:
     """평일 여부 (KST 기준, 토/일 제외)"""
     return datetime.now(KST).weekday() < 5
 
+async def _alert_global_market_failure(global_market: dict | None) -> None:
+    """글로벌 시장 수집 실패 운영 경보 (F2).
+
+    2026-08-10~08-14 yfinance 장애 5거래일을 아무도 모르고 지나간 재발 방지 —
+    _safe_collect의 조용한 격리를 경보로 보완한다. 정상(8종+)은 침묵.
+    """
+    n = len(global_market or {})
+    if n == 0:
+        await telegram_service.send_text(
+            "🛑 글로벌 시장 수집 전멸 — 브리프가 글로벌 데이터 없이 발송됨 "
+            "(VIX·환율 리스크 시그널 침묵 중)"
+        )
+    elif n < 5:
+        await telegram_service.send_text(
+            f"⚠️ 글로벌 시장 수집 부분 실패 — {n}/10종만 확보 (프록시 포함)"
+        )
+
+
 async def _alert_flow_fallback(flow: dict | None) -> None:
     """수급 폴백/전체실패 시 운영 경보 (§7.2). 성공(krx)은 침묵."""
     source = (flow or {}).get("source")
@@ -72,6 +90,7 @@ async def _generate_and_send():
                 await session.commit()
                 logger.info("스케줄: 모닝브리프 완료")
                 await _alert_flow_fallback(brief.investor_flow)
+                await _alert_global_market_failure(brief.global_market)
             else:
                 logger.error(
                     "스케줄: 모닝브리프 발송 실패 (id=%s) — sent_at 기록 보류, 다음 스케줄에 재시도",

@@ -40,9 +40,12 @@ async def diagnose_simple(
     """
     score = 0
     factors: list[str] = []
+    missing: list[str] = []   # F3: 입력 결손 추적 — "정상"과 "측정 불가"는 다른 정보
 
     # 1. VIX
     vix_data = global_market.get("vix") or global_market.get("VIX")
+    if not vix_data:
+        missing.append("VIX")
     if vix_data:
         vix = vix_data.get("close", 0)
         if vix >= VIX_CRITICAL:
@@ -54,6 +57,8 @@ async def diagnose_simple(
 
     # 2. 환율 5일 변동 (일변동 대용)
     usdkrw_data = global_market.get("usdkrw") or global_market.get("USDKRW")
+    if not usdkrw_data:
+        missing.append("환율")
     if usdkrw_data:
         chg = usdkrw_data.get("change_pct", 0)
         est_5d = abs(chg) * 2.5
@@ -65,6 +70,8 @@ async def diagnose_simple(
             factors.append(f"USD/KRW 변동 {chg:+.2f}% (주의)")
 
     # 3. 외인 5일 연속 매도
+    if not investor_flow_history:
+        missing.append("외인수급")
     if investor_flow_history:
         sells_in_row = 0
         for day in investor_flow_history[:5]:
@@ -87,6 +94,14 @@ async def diagnose_simple(
         level = "주의"
     else:
         level = "정상"
+
+    # F3: 입력 결손을 "정상"으로 위장하지 않는다.
+    # - 3축 중 2축 이상 결손 + 나머지 축에서 시그널 없음 → "판정불가"
+    # - 일부 결손 → level 유지하되 factors에 명시 (진단 불완전 고지)
+    if missing:
+        factors.append(f"⚠️ 데이터 없음: {', '.join(missing)} — 진단 불완전")
+        if len(missing) >= 2 and score < 20:
+            level = "판정불가"
 
     if not factors and level == "정상":
         factors = ["특이 위험 시그널 없음"]

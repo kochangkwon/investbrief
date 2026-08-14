@@ -97,7 +97,8 @@ async def generate_daily_brief(
     market_risk = await _safe_collect(
         "market_risk",
         _diagnose_market_risk(global_market),
-        {"level": "정상", "factors": [], "score": 0},
+        # 진단 자체가 죽으면 "정상"이 아니라 "판정불가" (F3 — 결손 위장 금지)
+        {"level": "판정불가", "factors": ["진단 실행 실패"], "score": 0},
     )
 
     # 4. AI 요약 (P0-1: 전문가 5섹션 브리프, P0-5 위험 모드 주입)

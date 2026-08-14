@@ -97,7 +97,7 @@ def _format_risk_header(market_risk: dict[str, Any]) -> str:
     level = market_risk.get("level", "정상")
     factors = market_risk.get("factors", [])
 
-    emoji_map = {"정상": "🟢", "주의": "🟠", "위험": "🔴"}
+    emoji_map = {"정상": "🟢", "주의": "🟠", "위험": "🔴", "판정불가": "⚪"}
     emoji = emoji_map.get(level, "⚪")
 
     if level == "정상":
