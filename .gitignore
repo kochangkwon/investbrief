@@ -7,6 +7,10 @@ __pycache__/
 node_modules/
 .next/
 
+# 런타임 산출물 (수급 캐시·서비스 로그)
+backend/runtime/
+backend/logs/
+
 # 백업 파일 (절대 커밋 금지)
 *.bak
 *.backup

@@ -52,5 +52,9 @@ class Settings(BaseSettings):
     kiwoom_account_no: str = ""
     kiwoom_is_mock: bool = False
 
+    # KRX 투자자 수급 로그인 (pykrx — 지시서 G). 서브프로세스 워커가 os.environ으로 읽음
+    krx_id: str = ""
+    krx_pw: str = ""
+
 
 settings = Settings()

@@ -30,6 +30,55 @@ DEFAULT_LAST_CLOSE_LOOKBACK_DAYS = 10
 # fetch_close_with_change 기본 lookback (전일 종가 1건이라도 확보)
 DEFAULT_CHANGE_LOOKBACK_DAYS = 14
 
+# KRX 지수 API 차단(data.krx.co.kr 'LOGOUT') 대응 — FDR 지수 코드를 네이버 지수 API로 우회.
+# 개별 종목은 FDR가 정상 동작하므로 지수 코드만 라우팅한다.
+_FDR_TO_NAVER_INDEX = {"KS11": "KOSPI", "KQ11": "KOSDAQ"}
+_NAVER_INDEX_PRICE_URL = "https://m.stock.naver.com/api/index/{code}/price"
+
+
+def _fetch_naver_index_history(
+    reuters_code: str, start: date, end: date, *, max_pages: int = 10
+) -> Optional[pd.DataFrame]:
+    """네이버 모바일 지수 API로 일별 종가 조회 (KRX 지수 차단 대체).
+
+    start 이전 데이터가 나올 때까지 페이지를 넘겨 수집한 뒤 [start, end]로 자른다.
+    반환: Date index + Close 컬럼 DataFrame (FDR와 동일 인터페이스) or None.
+    """
+    rows: list[dict[str, Any]] = []
+    try:
+        for page in range(1, max_pages + 1):
+            resp = httpx.get(
+                _NAVER_INDEX_PRICE_URL.format(code=reuters_code),
+                params={"pageSize": 20, "page": page},
+                headers=_NAVER_MCAP_HEADERS,
+                timeout=8.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if not data:
+                break
+            oldest: Optional[date] = None
+            for item in data:
+                traded = item.get("localTradedAt")
+                close_raw = (item.get("closePrice") or "").replace(",", "")
+                if not traded or not close_raw:
+                    continue
+                oldest = pd.to_datetime(traded).date()
+                rows.append({"Date": traded, "Close": float(close_raw)})
+            if oldest is not None and oldest <= start:
+                break
+    except Exception as e:
+        logger.warning("네이버 지수 조회 실패 %s [%s..%s]: %s", reuters_code, start, end, e)
+        return None
+
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.drop_duplicates("Date").set_index("Date").sort_index()
+    df = df.loc[str(start):str(end)]
+    return df if not df.empty else None
+
 
 def fetch_close_history(
     code: str,
@@ -48,6 +97,12 @@ def fetch_close_history(
         DataFrame (Date index, Open/High/Low/Close/Volume) or None
         - 빈 DataFrame, 예외, 컬럼 누락 → None
     """
+    reuters = _FDR_TO_NAVER_INDEX.get(code)
+    if reuters is not None:
+        start_d = pd.to_datetime(start).date()
+        end_d = pd.to_datetime(end).date() if end is not None else today_kst()
+        return _fetch_naver_index_history(reuters, start_d, end_d)
+
     try:
         df = (
             fdr.DataReader(code, start, end)

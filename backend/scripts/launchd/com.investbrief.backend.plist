@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  InvestBrief 백엔드 상주 서비스 (지시서 G-1).
+  설치 위치: ~/Library/LaunchAgents/com.investbrief.backend.plist (심볼릭 링크 권장)
+  절차는 같은 폴더 README.md 참조.
+
+  주의: 경로가 사용자별 절대경로다. 다른 계정/경로에 설치할 때 아래 4곳을 수정.
+    - ProgramArguments[0]  : venv 파이썬 절대경로
+    - WorkingDirectory      : backend 절대경로 (.env 로드 기준 — 반드시 backend)
+    - Standard{Out,Error}Path
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.investbrief.backend</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/changkwonko/dev/investbrief/backend/.venv/bin/python</string>
+        <string>-m</string>
+        <string>uvicorn</string>
+        <string>app.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8001</string>
+    </array>
+
+    <!-- .env가 이 디렉토리 기준으로 로드된다(BaseSettings env_file=".env"). 반드시 backend. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/changkwonko/dev/investbrief/backend</string>
+
+    <!-- 크래시·재부팅 자동 복구 -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 로그는 프로젝트 내부 (/tmp 금지 — StockAI 관행). backend/logs/는 gitignore됨. -->
+    <key>StandardOutPath</key>
+    <string>/Users/changkwonko/dev/investbrief/backend/logs/backend.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/changkwonko/dev/investbrief/backend/logs/backend.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

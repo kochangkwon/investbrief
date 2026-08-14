@@ -12,6 +12,7 @@ pydantic-settings==2.9.1
 # Data Collection
 yfinance==0.2.55
 finance-datareader==0.9.102
+pykrx==1.2.8  # KRX 투자자 수급 (로그인 필수 — KRX_ID/KRX_PW). 이번 침묵 실패 재발 방지 고정
 feedparser==6.0.11
 httpx==0.28.1
 

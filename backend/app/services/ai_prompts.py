@@ -150,7 +150,15 @@ def _format_flow_for_prompt(flow: dict[str, Any]) -> str:
     if sell_sectors:
         parts.append(f"외인 매도 상위 섹터: {', '.join(sell_sectors[:3])}")
 
-    return "\n".join(f"- {p}" for p in parts)
+    lines = [f"- {p}" for p in parts]
+
+    # 폴백(비-KRX) 시 기준일·출처 명시 — 낡은 데이터를 최신인 척 쓰는 최악 실패 방지
+    source = flow.get("source")
+    if source and source != "krx":
+        label = {"naver": "네이버", "cache": "전일 캐시"}.get(source, source)
+        lines.append(f"※ {flow.get('trade_date', '?')} 기준({label})")
+
+    return "\n".join(lines)
 
 
 def _format_news_for_prompt(news: list[dict[str, Any]]) -> str:

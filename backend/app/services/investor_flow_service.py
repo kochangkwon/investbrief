@@ -59,14 +59,18 @@ async def get_today_flow_summary(
         target_date if target_date else investor_flow_collector.latest_trading_date()
     )
 
-    market_flow = await investor_flow_collector.get_market_flow(trade_date)
-    if market_flow is None:
-        logger.warning("수급 데이터 조회 실패 (%s)", trade_date)
+    resilient = await investor_flow_collector.get_market_flow_resilient(trade_date)
+    if resilient is None:
+        logger.warning("수급 데이터 조회 실패 — 전 소스 실패 (%s)", trade_date)
         return {}
 
-    top_traders = await investor_flow_collector.get_top_foreign_traders(
-        trade_date, limit_buy=10, limit_sell=5
-    )
+    market_flow = resilient["market_flow"]
+    top_traders = resilient.get("top_traders", [])
+    if market_flow.get("source") != "krx":
+        logger.warning(
+            "수급 폴백 발동: source=%s trade_date=%s",
+            market_flow.get("source"), market_flow.get("trade_date"),
+        )
 
     # 섹터별 net 집계 (매수 종목 기준)
     buyers = [t for t in top_traders if t["net_billion"] > 0]

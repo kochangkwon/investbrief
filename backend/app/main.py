@@ -34,6 +34,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     port = int(os.getenv("PORT", settings.backend_port))
     logger.info("InvestBrief 서버 시작 (port %d)", port)
+
+    # KRX 자격증명을 os.environ에 주입 — pykrx 서브프로세스 워커가 상속해 로그인.
+    # launchd 기동 프로세스는 셸 환경을 상속하지 않으므로 이 연결이 없으면 수급이 죽는다.
+    for _k, _v in (("KRX_ID", settings.krx_id), ("KRX_PW", settings.krx_pw)):
+        if _v and not os.getenv(_k):
+            os.environ[_k] = _v
+    logger.info(
+        "KRX 자격증명: %s",
+        "설정됨" if settings.krx_id and settings.krx_pw else "누락",
+    )
+
     await init_db()
     logger.info("DB 초기화 완료")
     start_scheduler()
