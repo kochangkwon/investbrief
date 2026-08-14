@@ -32,9 +32,55 @@ async def _fetch_close_price(stock_code: str) -> Optional[int]:
     return int(close) if close else None
 
 
+def _extract_kospi_close(domestic_market: Optional[dict]) -> Optional[float]:
+    """daily_briefs.domestic_market JSON → kospi close (순수 함수, 폴백 파싱용)."""
+    try:
+        close = ((domestic_market or {}).get("kospi") or {}).get("close")
+        return float(close) if close else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def fetch_kospi_close_with_fallback(on_or_before=None) -> Optional[float]:
+    """코스피 종가 — 1차 KS11 API, 실패 시 daily_briefs 폴백 (P1-1).
+
+    kospi_at_alert 채움률이 22%에 그치던 원인(네이버 지수 API 간헐 실패)의
+    폴백. 브리프의 kospi close는 전일 종가라 알림 시점 기준으로 의미가 맞다.
+    """
+    close = await asyncio.to_thread(
+        price_collector.fetch_last_close, "KS11", on_or_before=on_or_before,
+    )
+    if close:
+        return close
+
+    try:
+        from app.database import async_session
+        from app.models.brief import DailyBrief
+        from sqlalchemy import select
+        async with async_session() as session:
+            stmt = select(DailyBrief).order_by(DailyBrief.date.desc()).limit(1)
+            if on_or_before is not None:
+                stmt = (
+                    select(DailyBrief)
+                    .where(DailyBrief.date <= on_or_before)
+                    .order_by(DailyBrief.date.desc())
+                    .limit(1)
+                )
+            brief = (await session.execute(stmt)).scalars().first()
+        fallback = _extract_kospi_close(brief.domestic_market if brief else None)
+        if fallback:
+            logger.info("KOSPI 폴백 사용 (daily_briefs): %.2f", fallback)
+        else:
+            logger.warning("KOSPI 조회 실패 — API·브리프 폴백 모두 불가")
+        return fallback
+    except Exception:
+        logger.warning("KOSPI 브리프 폴백 조회 예외", exc_info=True)
+        return None
+
+
 async def _fetch_kospi_close() -> Optional[float]:
-    """코스피 최근 종가 (alpha 비교용)."""
-    return await asyncio.to_thread(price_collector.fetch_last_close, "KS11")
+    """코스피 최근 종가 (alpha 비교용) — 폴백 포함."""
+    return await fetch_kospi_close_with_fallback()
 
 
 # ─────────────────────────────────────────────────────────

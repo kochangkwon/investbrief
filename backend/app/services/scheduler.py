@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -275,15 +275,30 @@ async def _weekly_theme_discovery():
 
 from pathlib import Path
 
-# "오를 종목" 피처 검증 자동 실행 (데이터 ~2.5개월 누적 후 1회)
+# "오를 종목" 피처 검증 자동 실행 — 최초 1회 + 이후 90일마다 재검증 (P4-1).
+# 마커 파일에 마지막 검증일(ISO)을 기록한다. 기존 "영구 동결"은 국면이 바뀌어도
+# 신호가 고정되는 문제였음.
 FEATURE_VALIDATION_TARGET = date(2026, 9, 11)
+REVALIDATION_INTERVAL_DAYS = 90
 _FEATURE_VALIDATION_MARKER = Path(__file__).resolve().parents[2] / ".feature_validation_done"
 
 
+def _last_validation_date() -> Optional[date]:
+    """마커의 마지막 검증일. 없거나 파싱 실패 시 None."""
+    try:
+        return date.fromisoformat(_FEATURE_VALIDATION_MARKER.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
 async def _feature_validation_check():
-    """목표일 이후 매일 게이트 체크 → 데이터 충분하면 1회 분석·발송 후 마커."""
-    if _FEATURE_VALIDATION_MARKER.exists():
-        return
+    """목표일 이후 매일 게이트 체크 → 충분하면 분석·발송. 90일마다 재검증."""
+    is_revalidation = _FEATURE_VALIDATION_MARKER.exists()
+    if is_revalidation:
+        last = _last_validation_date()
+        if last and (today_kst() - last).days < REVALIDATION_INTERVAL_DAYS:
+            return
+        # 마커 파싱 실패(last None)면 안전하게 재검증 진행
     if today_kst() < FEATURE_VALIDATION_TARGET:
         return
     try:
@@ -293,11 +308,24 @@ async def _feature_validation_check():
         if not result.get("ready"):
             logger.info("피처 검증 대기: %s", result.get("reason"))
             return
+        old_features = {s["feature"] for s in sp.load_signals()}
         # 양수·robust 신호를 픽커 설정으로 저장 (없으면 빈 리스트 → 픽커 무동작)
         signals = fv.extract_picker_signals(result)
         sp.save_signals(signals, validated_at=today_kst().isoformat())
         await telegram_service.send_text(fv.format_report(result))
-        if signals:
+        new_features = {s["feature"] for s in signals}
+        if is_revalidation:
+            if old_features != new_features:
+                added = sorted(new_features - old_features)
+                removed = sorted(old_features - new_features)
+                await telegram_service.send_text(
+                    "🔄 분기 재검증 — 픽커 신호 변경:\n"
+                    + (f"  + 추가: {', '.join(added)}\n" if added else "")
+                    + (f"  − 제거: {', '.join(removed)}" if removed else "")
+                )
+            else:
+                logger.info("분기 재검증: 신호 구성 유지 (%d개)", len(signals))
+        elif signals:
             await telegram_service.send_text(
                 f"✅ 양수·robust 신호 {len(signals)}개 발견 → 내일부터 '오를 종목 후보' 자동 발송."
             )
@@ -306,7 +334,8 @@ async def _feature_validation_check():
                 "ℹ️ 양수·robust 신호 없음 → '오를 종목 후보'는 보류(방어 필터는 유지)."
             )
         _FEATURE_VALIDATION_MARKER.write_text(today_kst().isoformat())
-        logger.info("피처 검증 자동 분석 발송 완료 (N=%d, 신호=%d)", result["n"], len(signals))
+        logger.info("피처 검증 분석 발송 완료 (N=%d, 신호=%d, 재검증=%s)",
+                    result["n"], len(signals), is_revalidation)
     except Exception:
         logger.exception("피처 검증 자동 분석 실패")
 

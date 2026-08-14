@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import statistics
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -73,6 +74,29 @@ async def _collect_monthly_stats(start_dt: datetime, end_dt: datetime) -> dict[s
             )
         )
 
+        # 알파 (P1-2): 종목·KOSPI 수익률이 **모두** 있는 페어드 표본만 사용
+        # (비페어드 평균 차는 커버리지 편향 — 페어드 기준이 정확)
+        paired_rows = (
+            await db.execute(
+                select(
+                    ThemeAlertCandidate.return_30d,
+                    ThemeAlertCandidate.kospi_return_30d,
+                )
+                .join(ThemeAlert, ThemeAlertCandidate.alert_id == ThemeAlert.id)
+                .where(
+                    and_(
+                        ThemeAlert.sent_at >= start_dt,
+                        ThemeAlert.sent_at < end_dt,
+                        ThemeAlertCandidate.return_30d.isnot(None),
+                    )
+                )
+            )
+        ).all()
+        alphas = [
+            float(r) - float(k) for r, k in paired_rows if k is not None
+        ]
+        alpha_excluded = len(paired_rows) - len(alphas)  # 벤치마크 없는 표본 수
+
         # 테마별 성과 TOP 3
         theme_rows = (
             await db.execute(
@@ -101,6 +125,14 @@ async def _collect_monthly_stats(start_dt: datetime, end_dt: datetime) -> dict[s
         "candidate_count": int(candidate_count),
         "avg_return_30d": float(avg_30) if avg_30 is not None else None,
         "avg_kospi_30d": float(avg_kospi_30) if avg_kospi_30 is not None else None,
+        "alpha_n": len(alphas),
+        "alpha_mean": round(statistics.mean(alphas), 2) if alphas else None,
+        "alpha_median": round(statistics.median(alphas), 2) if alphas else None,
+        "alpha_win_rate": (
+            round(100.0 * sum(1 for a in alphas if a > 0) / len(alphas), 1)
+            if alphas else None
+        ),
+        "alpha_excluded": alpha_excluded,
         "top_themes": [
             {
                 "theme_name": r.theme_name,
@@ -195,6 +227,16 @@ def _format_report(period_label: str, stats: dict[str, Any]) -> str:
             lines.append(f"  KOSPI 대비: {stats['avg_kospi_30d']:+.2f}%")
         if alpha is not None:
             lines.append(f"  Alpha: <b>{alpha:+.2f}%</b>")
+        # 페어드 알파 (P1-2) — 종목·KOSPI 둘 다 있는 표본 기준
+        if stats.get("alpha_mean") is not None:
+            lines.append(
+                f"  Alpha(페어드 n={stats['alpha_n']}): "
+                f"평균 <b>{stats['alpha_mean']:+.2f}%p</b> · "
+                f"중앙값 {stats['alpha_median']:+.2f}%p · "
+                f"승률 {stats['alpha_win_rate']:.0f}%"
+            )
+        if stats.get("alpha_excluded"):
+            lines.append(f"  <i>벤치마크 없는 표본 {stats['alpha_excluded']}건 제외</i>")
         lines.append("")
     else:
         lines.append("<i>D+30 데이터 부족 (다음달부터 본격 측정)</i>")

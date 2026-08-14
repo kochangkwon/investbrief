@@ -94,6 +94,39 @@ async def _load_listed_names() -> None:
         _listed_names = set()
 
 
+def _dynamic_freshness_hours(base_hours: int, gap_days: Optional[int], weekday: int) -> int:
+    """신선도 시간 계산 (순수 함수, P3-3).
+
+    직전 스캔일과의 갭이 있으면 gap_days×24h까지 확장 — 주말(월요일 gap=3
+    →72h)뿐 아니라 화요일 공휴일 뒤 수요일 등 연휴도 자동 커버.
+    갭 정보가 없으면(DB 실패 등) 기존 월요일 72h 규칙으로 폴백.
+    """
+    if base_hours <= 0:
+        return base_hours
+    if gap_days is not None and gap_days >= 1:
+        return max(base_hours, min(gap_days, 7) * 24)
+    if weekday == 0:   # 폴백: 월요일 주말분
+        return max(base_hours, 72)
+    return base_hours
+
+
+async def _days_since_last_scan_run() -> Optional[int]:
+    """오늘 이전 마지막 completed 스캔일과의 갭(일). 조회 실패 시 None."""
+    try:
+        from sqlalchemy import func as sa_func
+        today = now_kst().date()
+        async with async_session() as session:
+            last = await session.scalar(
+                select(sa_func.max(ThemeScanRun.scan_date))
+                .where(ThemeScanRun.scan_date < today)
+                .where(ThemeScanRun.status == "completed")
+            )
+        return (today - last).days if last else None
+    except Exception:
+        logger.warning("[radar] 직전 스캔일 조회 실패 — 신선도 폴백", exc_info=True)
+        return None
+
+
 def _group_prefix_is_noise(candidate: str, text: str) -> bool:
     """그룹명 단독 토큰이 지주사 오탐인지 판정 (순수 함수).
 
@@ -169,16 +202,32 @@ async def _verify_theme_match(
     )
 
 
+def _order_articles(info: dict[str, Any]) -> list[dict[str, Any]]:
+    """종목의 기사들을 검증 우선순위로 정렬 (순수 함수, P3-2).
+
+    우선순위: ① 제목에 종목명 포함 ② pub_date 최신 ("YYYY-MM-DD HH:MM"
+    문자열 비교, None은 최후). 첫 원소가 대표 기사.
+    """
+    main = {
+        "headline": info.get("headline", ""),
+        "description": info.get("description", ""),
+        "matched_keyword": info.get("matched_keyword", ""),
+        "url": info.get("url", ""),
+        "pub_date": info.get("pub_date"),
+    }
+    articles = [main] + list(info.get("alt_news") or [])
+    name = info.get("stock_name", "")
+    # 안정 정렬 2단계: pub_date 내림차순 → 종목명 포함 우선
+    articles.sort(key=lambda a: a.get("pub_date") or "", reverse=True)
+    articles.sort(key=lambda a: 0 if (name and name in (a.get("headline") or "")) else 1)
+    return articles
+
+
 # ── 스캔 엔진 (스케줄러/수동 스캔 진입점) ─────────────────────────────────
 
 
 def _find_multi_theme_titles(theme_title_map: dict[Any, set[str]]) -> set[str]:
-    """복수 테마에 동시 매칭된 뉴스 제목 집합을 반환.
-
-    동일 뉴스 제목이 2개 이상 테마의 키워드에 걸리면 특정 테마의 고유 재료가
-    아니라 광범위 시황/리포트일 가능성이 높다(예: 삼성증권 대장주 리포트).
-    이런 제목은 전 테마에서 검증 대상에서 제외한다. 순수 함수(테스트 용이).
-    """
+    """복수 테마에 동시 매칭된 뉴스 제목 집합을 반환 (순수 함수)."""
     counts: dict[str, int] = {}
     for titles in theme_title_map.values():
         for title in titles:           # 테마별 set → 같은 테마 내 중복은 이미 1회
@@ -186,6 +235,68 @@ def _find_multi_theme_titles(theme_title_map: dict[Any, set[str]]) -> set[str]:
                 continue
             counts[title] = counts.get(title, 0) + 1
     return {title for title, c in counts.items() if c >= 2}
+
+
+# P3-1: 광범위 기사 마커 — 복수 테마 매칭 + 이 마커 포함이면 전 테마 차단.
+# (기존 "복수 매칭 = 전량 차단"은 HBM 대형 수주처럼 강한 재료일수록 여러
+#  테마에 걸려 버려지는 역선택이었다 — 마커 없는 복수 매칭은 대표 테마 배정)
+_BROAD_ARTICLE_MARKERS = (
+    "관련주", "수혜주", "대장주", "테마주", "목표주가",
+    "추천주", "유망주", "정리", "총정리", "리포트",
+)
+
+
+def _find_banned_broad_titles(theme_title_map: dict[Any, set[str]]) -> set[str]:
+    """복수 테마 매칭 AND 광범위 마커 포함 제목 → 전 테마 차단 (순수 함수)."""
+    multi = _find_multi_theme_titles(theme_title_map)
+    return {
+        t for t in multi
+        if any(marker in t for marker in _BROAD_ARTICLE_MARKERS)
+    }
+
+
+def _assign_primary_theme(
+    title_kw_counts: dict[str, dict[Any, int]],
+    banned_titles: set[str],
+) -> dict[str, Any]:
+    """마커 없는 복수 테마 매칭 제목 → 대표 테마 1개 배정 (순수 함수).
+
+    대표 = 그 제목이 매칭한 키워드 수가 가장 많은 테마. 동률이면 theme_id
+    낮은 쪽 (결정론적). 단일 테마 제목·차단 제목은 배정하지 않는다.
+    """
+    primary: dict[str, Any] = {}
+    for title, per_theme in title_kw_counts.items():
+        if not title or title in banned_titles or len(per_theme) < 2:
+            continue
+        best = max(per_theme.items(), key=lambda kv: (kv[1], -_orderable(kv[0])))
+        primary[title] = best[0]
+    return primary
+
+
+def _orderable(theme_id: Any) -> int:
+    """theme_id를 동률 비교용 정수로 (int가 아니면 hash 폴백)."""
+    try:
+        return int(theme_id)
+    except (TypeError, ValueError):
+        return hash(theme_id)
+
+
+def _build_title_kw_counts(
+    theme_news_map: dict[Any, list[dict[str, Any]]],
+) -> dict[str, dict[Any, int]]:
+    """제목 → {theme_id: 매칭된 고유 키워드 수} (순수 함수)."""
+    out: dict[str, dict[Any, set]] = {}
+    for tid, news in theme_news_map.items():
+        for n in news:
+            title = n.get("title") or ""
+            kw = n.get("matched_keyword")
+            if not title or not kw:
+                continue
+            out.setdefault(title, {}).setdefault(tid, set()).add(kw)
+    return {
+        title: {tid: len(kws) for tid, kws in per.items()}
+        for title, per in out.items()
+    }
 
 
 async def _gather_theme_news(theme: Theme) -> list[dict[str, Any]]:
@@ -198,10 +309,14 @@ async def _gather_theme_news(theme: Theme) -> list[dict[str, Any]]:
     if not keywords:
         return []
 
-    # 신선도 기준: 기본 24h, 월요일은 주말 경과분 수용 위해 72h. 0이면 필터 무효.
+    # 신선도 기준: 직전 스캔일 갭 기반 동적 확장 (P3-3 — 연휴 자동 커버).
+    # 0이면 필터 무효. DB 조회 실패 시 월요일 72h 규칙 폴백.
     freshness_hours = settings.theme_news_freshness_hours
-    if freshness_hours > 0 and now_kst().weekday() == 0:
-        freshness_hours = max(freshness_hours, 72)
+    if freshness_hours > 0:
+        gap_days = await _days_since_last_scan_run()
+        freshness_hours = _dynamic_freshness_hours(
+            freshness_hours, gap_days, now_kst().weekday(),
+        )
     now = now_kst()
 
     all_news: list[dict[str, Any]] = []
@@ -271,14 +386,19 @@ async def scan_all_themes() -> dict[str, int]:
             except Exception:
                 logger.exception("테마 뉴스 수집 실패: %s", theme.name)
                 theme_news_map[theme.id] = []
-        banned_titles = _find_multi_theme_titles({
+        theme_title_map = {
             tid: {n.get("title", "") for n in news if n.get("title")}
             for tid, news in theme_news_map.items()
-        })
-        if banned_titles:
+        }
+        # P3-1: 광범위 마커 기사만 전 테마 차단, 나머지 복수 매칭은 대표 테마 배정
+        banned_titles = _find_banned_broad_titles(theme_title_map)
+        primary_theme_by_title = _assign_primary_theme(
+            _build_title_kw_counts(theme_news_map), banned_titles,
+        )
+        if banned_titles or primary_theme_by_title:
             logger.info(
-                "[cross_theme_guard] 복수 테마 매칭 제목 %d건 → 전 테마 검증 제외",
-                len(banned_titles),
+                "[cross_theme_guard] 광범위 기사 차단 %d건 · 대표 테마 배정 %d건",
+                len(banned_titles), len(primary_theme_by_title),
             )
 
         total_stocks = 0
@@ -289,6 +409,7 @@ async def scan_all_themes() -> dict[str, int]:
                         session, theme, scan_date=scan_date,
                         all_news=theme_news_map.get(theme.id),
                         banned_titles=banned_titles,
+                        primary_theme_by_title=primary_theme_by_title,
                     )
                 results[theme.name] = count
                 total_stocks += count
@@ -329,18 +450,41 @@ async def _verify_and_persist_detections(
     rejected_no = 0
     rejected_low = 0
     verify_failed = 0
+    retry_yes = 0   # P3-2: 대체 기사 재검증으로 YES 전환된 건수
     for stock_code, info in detected_stocks.items():
         if stock_code in existing_codes:
             continue
 
+        # P3-2: 대표 기사 선정 → 판정. NO이고 대체 기사가 있으면 **1회만** 재검증
+        # (약한 스침 기사가 먼저 잡혀 강한 재료가 NO 되는 첫 기사 편향 해소).
+        articles = _order_articles(info)
+        chosen = articles[0]
         verdict, materiality, reason = await _verify_theme_match(
             theme_name=theme.name,
-            matched_keyword=info["matched_keyword"],
+            matched_keyword=chosen["matched_keyword"],
             stock_name=info["stock_name"],
-            title=info["headline"],
-            description=info.get("description", ""),
-            pub_date_str=info.get("pub_date"),
+            title=chosen["headline"],
+            description=chosen.get("description", ""),
+            pub_date_str=chosen.get("pub_date"),
         )
+        if verdict is False and len(articles) > 1:
+            v2, m2, r2 = await _verify_theme_match(
+                theme_name=theme.name,
+                matched_keyword=articles[1]["matched_keyword"],
+                stock_name=info["stock_name"],
+                title=articles[1]["headline"],
+                description=articles[1].get("description", ""),
+                pub_date_str=articles[1].get("pub_date"),
+            )
+            if v2 is True:
+                verdict, materiality, reason = v2, m2, r2
+                chosen = articles[1]
+                retry_yes += 1
+        # 채택 기사를 대표로 반영 (기록·알림 일관성)
+        info["headline"] = chosen["headline"]
+        info["matched_keyword"] = chosen["matched_keyword"]
+        info["url"] = chosen.get("url", info.get("url", ""))
+        info["pub_date"] = chosen.get("pub_date")
         logger.info(
             "테마 검증: theme=%s stock=%s(%s) verdict=%s materiality=%s reason=%s",
             theme.name, info["stock_name"], stock_code,
@@ -381,10 +525,10 @@ async def _verify_and_persist_detections(
             info["materiality"] = materiality
             new_detections.append(info)
 
-    if rejected_no or rejected_low or verify_failed:
+    if rejected_no or rejected_low or verify_failed or retry_yes:
         logger.info(
-            "[verify] %s 탈락 분포: NO=%d, materiality_LOW=%d, 미판정=%d",
-            theme.name, rejected_no, rejected_low, verify_failed,
+            "[verify] %s 탈락 분포: NO=%d, materiality_LOW=%d, 미판정=%d, retry_yes=%d",
+            theme.name, rejected_no, rejected_low, verify_failed, retry_yes,
         )
     last_scan_stats["verify_failed"] += verify_failed
 
@@ -404,25 +548,33 @@ async def _scan_single_theme(
     scan_date: Optional[date] = None,
     all_news: Optional[list[dict[str, Any]]] = None,
     banned_titles: Optional[set[str]] = None,
+    primary_theme_by_title: Optional[dict[str, Any]] = None,
 ) -> int:
     """단일 테마 스캔 — 신규 감지 종목 수 반환.
 
     all_news가 주어지면 재사용(교차 테마 가드 경로), 없으면 자체 수집.
-    banned_titles(복수 테마 동시 매칭 제목)에 속한 뉴스는 검증 대상에서 제외.
+    banned_titles(광범위 마커 + 복수 테마 매칭 제목)는 전 테마 검증 제외.
+    primary_theme_by_title에 배정된 제목은 대표 테마가 아니면 skip (P3-1).
     """
     if all_news is None:
         all_news = await _gather_theme_news(theme)
     banned_titles = banned_titles or set()
+    primary_theme_by_title = primary_theme_by_title or {}
 
     if not all_news:
         return 0
 
     detected_stocks: dict[str, dict[str, Any]] = {}
     banned_skipped = 0
+    reassigned_skipped = 0
     for news in all_news:
         title = news.get("title", "")
-        if title in banned_titles:   # 복수 테마 매칭 제목 → 전 테마 검증 제외
+        if title in banned_titles:   # 광범위 기사 → 전 테마 검증 제외
             banned_skipped += 1
+            continue
+        # P3-1: 다른 테마에 대표 배정된 제목은 이 테마에서 skip
+        if primary_theme_by_title.get(title, theme.id) != theme.id:
+            reassigned_skipped += 1
             continue
         description = news.get("description", "")
         combined_text = f"{title} {description[:200]}"
@@ -464,12 +616,27 @@ async def _scan_single_theme(
                     "matched_keyword": news["matched_keyword"],
                     "url": news.get("link", ""),
                     "pub_date": news.get("pub_date"),
+                    "alt_news": [],
                 }
+            else:
+                # P3-2: 다른 제목의 기사면 대체 기사로 축적 (첫 기사 편향 해소)
+                info = detected_stocks[stock_code]
+                existing_titles = {info["headline"]} | {
+                    a["headline"] for a in info.get("alt_news", [])
+                }
+                if title not in existing_titles and len(info.get("alt_news", [])) < 2:
+                    info.setdefault("alt_news", []).append({
+                        "headline": title,
+                        "description": news.get("description", ""),
+                        "matched_keyword": news["matched_keyword"],
+                        "url": news.get("link", ""),
+                        "pub_date": news.get("pub_date"),
+                    })
 
-    if banned_skipped:
+    if banned_skipped or reassigned_skipped:
         logger.info(
-            "[cross_theme_guard] %s: 복수 테마 매칭 제목 %d건 검증 제외",
-            theme.name, banned_skipped,
+            "[cross_theme_guard] %s: 광범위 차단 %d건 · 타 테마 배정 skip %d건",
+            theme.name, banned_skipped, reassigned_skipped,
         )
 
     # ── DART 🟢 호재 공시 추출 (테마 키워드가 공시 제목에 포함된 것만) ──
@@ -478,7 +645,9 @@ async def _scan_single_theme(
     keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
     try:
         from app.collectors import dart_collector
-        disclosures = await dart_collector.get_today_disclosures(target_date=scan_date)
+        disclosures = await dart_collector.get_today_disclosures(
+            target_date=scan_date, include_previous_day=True,  # P2-1: 08:10엔 당일 공시 거의 없음
+        )
     except Exception:
         logger.exception(
             "[scan_single_theme] DART 수집 실패 — 뉴스만으로 진행: %s", theme.name
@@ -681,6 +850,7 @@ async def _fail_scan_run(scan_date: date, error: str) -> None:
 _SUPPLY_DEMAND_KEYS = (
     "short_weight_5d", "short_weight_prev5", "short_weight_rising",
     "lending_balance", "lending_surge", "institution_net", "foreign_net",
+    "institution_net_5d", "foreign_net_5d",   # P2-2: ka10059 히스토리 합계
 )
 
 

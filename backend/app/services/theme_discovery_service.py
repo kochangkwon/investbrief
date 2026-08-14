@@ -21,6 +21,16 @@ from app.utils.timezone import now_kst_naive, today_kst
 
 logger = logging.getLogger(__name__)
 
+# P2-3: 발굴 보조 코퍼스 — 섹터 고정 키워드 (거시 뉴스만으로는 니치 테마가
+# 입력에 등장하지 않는 문제 보완). 운영하며 조정.
+SECTOR_KEYWORDS = [
+    "반도체 장비", "2차전지 소재", "방산 수주", "조선 수주", "제약 임상",
+    "로봇", "원전", "전력기기", "화장품 수출", "게임 신작",
+]
+# 프롬프트 입력 배분: 거시(브리프) 400 + 섹터 200 (기존 상한 600 유지)
+_MACRO_TITLE_CAP = 400
+_SECTOR_TITLE_CAP = 200
+
 # radar와 동일 패턴 — 영문 시작 허용 (LG·SK·HD·POSCO 등 대형주가
 # 빈도 분석에서 구조적으로 제외되던 불일치 해소)
 STOCK_NAME_PATTERN = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9&]{1,14})")
@@ -274,6 +284,27 @@ async def discover_themes(days: int = 30) -> dict[str, Any]:
                 disclosure_titles.append(f"[{date_str}] {title}")
         if brief.news_summary:
             ai_summaries.append(f"[{date_str}] {brief.news_summary[:200]}")
+
+    # P2-3: 섹터 보조 코퍼스 — 거시 400 + 섹터 200 배분
+    news_titles = news_titles[:_MACRO_TITLE_CAP]
+    sector_titles: list[str] = []
+    from app.collectors.news_collector import _fetch_naver_news
+    for kw in SECTOR_KEYWORDS:
+        try:
+            items = await _fetch_naver_news(kw, display=10)
+        except Exception:
+            logger.exception("섹터 키워드 뉴스 수집 실패: %s", kw)
+            continue
+        for it in items:
+            title = it.get("title", "")
+            if title:
+                sector_titles.append(f"[섹터:{kw}] {title}")
+    news_titles += sector_titles[:_SECTOR_TITLE_CAP]
+    logger.info(
+        "테마 발굴 코퍼스: 거시 %d + 섹터 %d",
+        len(news_titles) - min(len(sector_titles), _SECTOR_TITLE_CAP),
+        min(len(sector_titles), _SECTOR_TITLE_CAP),
+    )
 
     events_text = ""
     try:

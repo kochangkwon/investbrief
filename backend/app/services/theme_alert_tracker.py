@@ -34,13 +34,9 @@ async def _fetch_close_on_or_before(stock_code: str, target: date) -> Optional[i
 
 
 async def _fetch_kospi_on_or_before(target: date) -> Optional[float]:
-    """target 이전(포함)의 코스피 종가."""
-    return await asyncio.to_thread(
-        price_collector.fetch_last_close,
-        "KS11",
-        on_or_before=target,
-        lookback_days=7,
-    )
+    """target 이전(포함)의 코스피 종가 — 실패 시 daily_briefs 폴백 (P1-1)."""
+    from app.services.theme_alert_service import fetch_kospi_close_with_fallback
+    return await fetch_kospi_close_with_fallback(on_or_before=target)
 
 
 def _column_names(target_n: int) -> tuple[str, str, str]:

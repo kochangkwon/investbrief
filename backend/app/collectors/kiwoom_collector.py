@@ -260,10 +260,11 @@ async def get_supply_demand_signal(stock_code: str) -> Optional[dict[str, Any]]:
     if not _enabled():
         return None
 
-    short, lending, instfrgn = await asyncio.gather(
+    short, lending, instfrgn, inv_hist = await asyncio.gather(
         get_short_selling(stock_code),
         get_lending_trend(stock_code),
         get_institution_foreign(stock_code),
+        get_investor_history(stock_code),   # P2-2: 일자별 히스토리 (장중에도 값 존재)
     )
 
     metrics: dict[str, Any] = {}
@@ -297,5 +298,20 @@ async def get_supply_demand_signal(stock_code: str) -> Optional[dict[str, Any]]:
             metrics["institution_net"] = instfrgn["institution_net"]
         if instfrgn.get("foreign_net") is not None:
             metrics["foreign_net"] = instfrgn["foreign_net"]
+
+    # P2-2: ka10059 일자별 히스토리로 최근 5거래일 순매수 합계.
+    # ka10009는 08:10 장중 미정산 공란이라 운영 데이터에 0건 수집되던 축 —
+    # 히스토리 합계는 스냅샷에 축적만 한다 (검증 피처 추가는 60일 축적 후 별도 판단).
+    if inv_hist:
+        inst_vals = [r["institution_net"] for r in inv_hist if r.get("institution_net") is not None]
+        frgn_vals = [r["foreign_net"] for r in inv_hist if r.get("foreign_net") is not None]
+        if inst_vals:
+            metrics["institution_net_5d"] = sum(inst_vals[:5])
+            if "institution_net" not in metrics:   # ka10009 공란 폴백 (최신 1일)
+                metrics["institution_net"] = inst_vals[0]
+        if frgn_vals:
+            metrics["foreign_net_5d"] = sum(frgn_vals[:5])
+            if "foreign_net" not in metrics:
+                metrics["foreign_net"] = frgn_vals[0]
 
     return metrics or None
