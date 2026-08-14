@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.collectors import price_collector
 from app.models.theme_alert import ThemeAlert, ThemeAlertCandidate
 from app.services import telegram_service
+from app.utils.timezone import now_kst_naive
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,10 @@ async def send_theme_alert(
             theme_id=theme_id,
             theme_name=theme_name,
             candidate_count=len(enriched),
-            sent_at=datetime.utcnow(),
+            # KST naive — 프로젝트 표준 (utcnow는 알림일이 전날로 기록되어
+            # D+N 추적 앵커가 하루 밀리는 버그가 있었음. 과거 데이터 보정은
+            # scripts/migrate_sent_at_kst.py 1회 실행)
+            sent_at=now_kst_naive(),
         )
         db.add(alert)
         await db.flush()  # alert.id 확보

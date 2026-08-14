@@ -21,7 +21,9 @@ from app.utils.timezone import now_kst_naive, today_kst
 
 logger = logging.getLogger(__name__)
 
-STOCK_NAME_PATTERN = re.compile(r"([가-힣][가-힣A-Za-z0-9]{1,14})")
+# radar와 동일 패턴 — 영문 시작 허용 (LG·SK·HD·POSCO 등 대형주가
+# 빈도 분석에서 구조적으로 제외되던 불일치 해소)
+STOCK_NAME_PATTERN = re.compile(r"([A-Za-z가-힣][A-Za-z가-힣0-9&]{1,14})")
 
 
 # ── 시장 주목 검증 게이트 (권고 3) ────────────────────────────────────────
@@ -120,8 +122,9 @@ async def _analyze_stock_frequency_with_titles(
     verified: list[dict[str, Any]] = []
 
     for name, count in top_candidates:
-        # 권고 2: 단음절 차단 (동음이의어 위험)
-        if len(name) <= 2:
+        # 단음절 차단 (정규식이 이미 2자 이상 보장 — 기아 등 2자 상장사를
+        # 차단하던 <= 2 조건을 주석 의도대로 정정)
+        if len(name) < 2:
             continue
 
         try:
@@ -676,6 +679,11 @@ async def deactivate_stale_themes(inactive_days: int = 42) -> list[str]:
                 .where(ThemeDetection.theme_id == theme.id)
                 .where(ThemeDetection.detected_at >= cutoff)
                 .where(ThemeDetection.is_active.is_(True))
+                # NO 판정 기록은 "활동"으로 치지 않음 (NULL=레거시 YES)
+                .where(
+                    (ThemeDetection.verdict.is_(None))
+                    | (ThemeDetection.verdict != "NO")
+                )
                 .limit(1)
             )
             if det_result.first() is not None:
