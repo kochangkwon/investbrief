@@ -29,3 +29,6 @@ backend/logs/
 
 # DART corpCode 로컬 캐시 (7일 TTL로 자동 재생성)
 backend/data/dart_corpcode.json
+
+# bkit 도구 세션 상태파일 (커밋 노이즈)
+docs/.bkit-memory.json
