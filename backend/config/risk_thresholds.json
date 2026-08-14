@@ -1,0 +1,12 @@
+{
+  "_comment": "기본값은 일반적 재무분석 관행 기준. 절대 기준 아님. 사용자가 조정할 것. 파일 저장 시 서버 재시작 없이 반영됨(mtime 감지).",
+  "A1_cip_ratio":          { "caution": 0.30, "danger": 0.50 },
+  "A2_cip_yoy":            { "caution": 0.50, "danger": 1.00 },
+  "B2_capex_ratio":        { "caution": 1.00, "danger": 1.50 },
+  "B3_capex_초과연수":      { "caution": 2,    "danger": 3 },
+  "C3_net_debt_to_ebitda": { "caution": 3.0,  "danger": 5.0 },
+  "C4_interest_coverage":  { "caution": 2.0,  "danger": 1.0, "direction": "below" },
+  "C5_debt_growth":        { "caution": 0.30, "danger": 0.70 },
+  "D1_dilution_ratio":     { "caution": 0.05, "danger": 0.10 },
+  "D3_non_growth_ratio":   { "caution": 0.30, "danger": 0.50 }
+}

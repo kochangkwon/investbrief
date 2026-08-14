@@ -15,6 +15,7 @@ from app.services import (
     ai_summarizer,
     investor_flow_service,
     market_risk_simple,
+    risk_flags,
     watchlist_service,
 )
 from app.utils.timezone import now_kst_naive, today_kst
@@ -38,6 +39,25 @@ async def _diagnose_market_risk(global_market: dict[str, Any]) -> dict[str, Any]
         global_market=global_market,
         investor_flow_history=flow_history,
     )
+
+
+async def _collect_risk_flags(
+    session: AsyncSession, watchlist_data: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """관심종목 재무 리스크 플래그 — 발동 종목만 반환 (전 종목 나열 금지)."""
+    flagged: list[dict[str, Any]] = []
+    for item in watchlist_data:
+        code = item.get("stock_code")
+        if not code:
+            continue
+        try:
+            report = await risk_flags.get_risk_flags(session, code)
+        except Exception:
+            logger.exception("리스크 플래그 계산 실패: %s", code)
+            continue
+        if risk_flags.has_flag(report):
+            flagged.append(report)
+    return flagged
 
 
 async def generate_daily_brief(
@@ -99,6 +119,11 @@ async def generate_daily_brief(
         "watchlist", watchlist_service.check_watchlist(session, target_date=target_date), []
     )
 
+    # 5. 관심종목 재무 리스크 플래그 (플래그 발동 종목만)
+    flagged = await _safe_collect(
+        "risk_flags", _collect_risk_flags(session, watchlist_data), []
+    )
+
     # 4. 브리프 조립
     brief = DailyBrief(
         date=brief_date,
@@ -110,6 +135,7 @@ async def generate_daily_brief(
         watchlist_check=watchlist_data,
         investor_flow=investor_flow,
         market_risk=market_risk,
+        risk_flags=flagged,
         created_at=now_kst_naive(),
     )
 

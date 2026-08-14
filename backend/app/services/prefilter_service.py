@@ -4,8 +4,9 @@
 너무 작은 종목을 사전 제외해서 StockAI pipeline_agent의 즉시제외 비율을
 줄인다.
 
-InvestBrief에는 DART 재무 캐시(`FinancialStatement`) 테이블이 없으므로
-F5(EPS < 0) 필터는 보수적 통과로 처리한다 (재무 캐시 추가 시 활성화).
+F5(재무 리스크): `risk_flags`(DART 공시 기반 네거티브 스크리닝)를 배선.
+그룹(A~D) 중 하나라도 "위험" 판정이면 하드 제외. 조회 실패/커버리지 밖은
+보수적 통과 (DART 미등록 신규 종목 등).
 """
 from __future__ import annotations
 
@@ -18,6 +19,8 @@ from typing import Any, Optional
 import pandas as pd
 
 from app.collectors import kiwoom_collector, price_collector
+from app.database import async_session
+from app.services import risk_flags
 from app.utils.timezone import today_kst
 
 logger = logging.getLogger(__name__)
@@ -35,6 +38,9 @@ PREFILTER_SHORT_WEIGHT_MAX = 15.0    # 최근 5일 공매도 비중 평균(%) �
 PREFILTER_LENDING_SURGE_MAX = 1.5    # 대차잔고 급증 배수 상한 (최신/직전평균)
 
 PREFILTER_CONCURRENCY = 5
+
+# F5 재무 리스크 조회 타임아웃 (DART 3회 호출 — 캐시 시 즉시)
+RISK_FLAGS_TIMEOUT_SEC = 25.0
 
 
 @dataclass
@@ -103,16 +109,18 @@ def _check_price_filters(
     """F1~F4: 가격/이격도/모멘텀.
 
     반환 (passed, reasons, metrics):
-    - 데이터 부족 → (None, [reason], {}) → 호출자가 보수적 통과
+    - 데이터 부족/무효 → (False, [reason], {}) — fail-closed.
+      상장 60일 미만 신규주는 RSI·이격·모멘텀을 하나도 측정할 수 없는 채
+      통과하는 구멍이었음(변동성 최대 구간). F6(시총)과 동일 정책으로 통일.
     - 위반 1개 이상 → (False, [reasons], metrics)
     - 모두 정상 → (True, [], metrics)
     """
     if not closes or len(closes) < 60:
-        return None, ["가격 데이터 부족 (<60일)"], {}
+        return False, ["F1-4: 가격 데이터 부족 (<60일) — 제외 (fail-closed)"], {}
 
     current = closes[-1]
     if current <= 0:
-        return None, ["현재가 무효"], {}
+        return False, ["F1-4: 현재가 무효 — 제외 (fail-closed)"], {}
 
     metrics: dict[str, Any] = {"current": current}
     fails: list[str] = []
@@ -219,20 +227,62 @@ def _check_supply_demand_filter(
     return True, [], metrics
 
 
+# ── F5: 재무 리스크 (DART 네거티브 스크리닝) ────────────────────────
+
+
+async def _fetch_risk_report(stock_code: str) -> Optional[dict[str, Any]]:
+    """risk_flags 리포트 조회. 실패/타임아웃 → None (보수적 통과)."""
+    try:
+        async with async_session() as session:
+            return await asyncio.wait_for(
+                risk_flags.get_risk_flags(session, stock_code),
+                timeout=RISK_FLAGS_TIMEOUT_SEC,
+            )
+    except asyncio.TimeoutError:
+        logger.warning("[prefilter] %s F5 재무리스크 조회 타임아웃 — 보수적 통과", stock_code)
+        return None
+    except Exception:
+        logger.warning("[prefilter] %s F5 재무리스크 조회 예외 — 보수적 통과", stock_code, exc_info=True)
+        return None
+
+
+def _check_risk_flags_filter(
+    report: Optional[dict[str, Any]],
+) -> tuple[Optional[bool], list[str], dict[str, Any]]:
+    """F5: 재무 리스크 그룹(A~D) 중 "위험" 판정 시 제외.
+
+    - report None(조회 실패/타임아웃) 또는 error(커버리지 밖) → (None, [], {}) 보수적 통과
+    - 하나 이상 그룹이 "위험" → 제외
+    - "주의" 이하는 통과 (레벨은 메트릭으로 첨부)
+    """
+    if not report or report.get("error"):
+        return None, [], {}
+
+    flags = report.get("flags") or {}
+    levels = {name: (g or {}).get("level") for name, g in flags.items()}
+    metrics: dict[str, Any] = {"risk_levels": levels}
+
+    danger = [name for name, lv in levels.items() if lv == "위험"]
+    if danger:
+        return False, [f"F5: 재무리스크 위험 ({', '.join(danger)})"], metrics
+    return True, [], metrics
+
+
 # ── 통합 진입점 ─────────────────────────────────────────────────────
 
 
 async def prefilter_stock(stock_code: str) -> PrefilterResult:
     """단일 종목 사전 필터.
 
-    F1~F4(가격/이격/모멘텀) + F6(시총)을 적용. F5(EPS)는 InvestBrief에
-    재무 캐시 테이블이 없어 보수적 통과 처리. 명백 위반(False)이 하나라도
-    있으면 제외, 조회 실패(None)는 통과.
+    F1~F4(가격/이격/모멘텀) + F5(재무리스크) + F6(시총) + F7~F8(수급)을 적용.
+    명백 위반(False)이 하나라도 있으면 제외. F5/F7~F8 조회 실패(None)는 통과,
+    F1~F4/F6 데이터 부족은 fail-closed 제외.
     """
-    closes_result, mcap_result, supply_result = await asyncio.gather(
+    closes_result, mcap_result, supply_result, risk_result = await asyncio.gather(
         _fetch_closes(stock_code),
         _fetch_market_cap(stock_code),
         kiwoom_collector.get_supply_demand_signal(stock_code),
+        _fetch_risk_report(stock_code),
         return_exceptions=True,
     )
 
@@ -254,20 +304,30 @@ async def prefilter_stock(stock_code: str) -> PrefilterResult:
     else:
         supply = supply_result
 
+    if isinstance(risk_result, Exception):
+        logger.warning("[prefilter] %s F5 예외: %s", stock_code, risk_result)
+        risk_report: Optional[dict[str, Any]] = None
+    else:
+        risk_report = risk_result
+
     price_pass, price_reasons, price_metrics = _check_price_filters(closes)
     mcap_pass, mcap_reasons, mcap_metrics = _check_market_cap_filter(mcap)
     supply_pass, supply_reasons, supply_metrics = _check_supply_demand_filter(supply)
+    risk_pass, risk_reasons, risk_metrics = _check_risk_flags_filter(risk_report)
 
     explicitly_failed = (
-        price_pass is False or mcap_pass is False or supply_pass is False
+        price_pass is False
+        or mcap_pass is False
+        or supply_pass is False
+        or risk_pass is False
     )
     passed = not explicitly_failed
 
     return PrefilterResult(
         code=stock_code,
         passed=passed,
-        reasons=price_reasons + mcap_reasons + supply_reasons,
-        metrics={**price_metrics, **mcap_metrics, **supply_metrics},
+        reasons=price_reasons + mcap_reasons + supply_reasons + risk_reasons,
+        metrics={**price_metrics, **mcap_metrics, **supply_metrics, **risk_metrics},
     )
 
 

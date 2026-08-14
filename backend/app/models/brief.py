@@ -20,6 +20,7 @@ class DailyBrief(Base):
     watchlist_check: Mapped[list] = mapped_column(JSON)
     investor_flow: Mapped[dict] = mapped_column(JSON, default=dict, nullable=True)
     market_risk: Mapped[dict] = mapped_column(JSON, default=dict, nullable=True)
+    risk_flags: Mapped[list] = mapped_column(JSON, default=list, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, default=datetime.datetime.now
     )

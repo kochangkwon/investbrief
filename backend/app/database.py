@@ -112,6 +112,7 @@ async def init_db():
     # 모델 import 보장 (Base.metadata에 등록되도록)
     from app.models import (  # noqa: F401
         DailyBrief,
+        DartApiCache,
         FundamentalSimple,
         StockCorpMap,
         ThemeScanResult,

@@ -5,6 +5,7 @@ theme_radar_service / theme_discovery_service가 공통으로 사용한다.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Optional
@@ -17,6 +18,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOKENS = 200  # MATERIALITY 1줄 추가로 150→200
 DEFAULT_TIMEOUT_SEC = 15.0
+# rate limit/timeout 재시도 — 스캔 중반 일시 장애가 이후 후보 전체를
+# 조용히 소거하는 것을 방지 (재시도 소진 시에만 에러 반환)
+RETRY_ATTEMPTS = 3          # 최초 1회 + 재시도 2회
+RETRY_BACKOFF_BASE_SEC = 1.0
 
 _VERDICT_RE = re.compile(r"VERDICT:\s*(YES|NO)", re.IGNORECASE)
 _REASON_RE = re.compile(r"REASON:\s*(.+?)(?:\n|$)", re.IGNORECASE | re.DOTALL)
@@ -75,23 +80,32 @@ async def _call_raw(
     """Claude 호출 → (raw_text, error). error가 None이면 성공."""
     if not settings.anthropic_api_key:
         return "", "no api key"
-    try:
-        client = _get_client().with_options(timeout=timeout)
-        response = await client.messages.create(
-            model=settings.ai_model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return (response.content[0].text if response.content else ""), None
-    except anthropic.RateLimitError:
-        logger.warning("AI 검증 rate limit %s", log_context)
-        return "", "rate limit"
-    except anthropic.APITimeoutError:
-        logger.warning("AI 검증 timeout %s", log_context)
-        return "", "timeout"
-    except Exception as e:
-        logger.exception("AI 검증 API 예외 %s", log_context)
-        return "", f"api error: {type(e).__name__}"
+    last_err = "unknown"
+    for attempt in range(RETRY_ATTEMPTS):
+        try:
+            client = _get_client().with_options(timeout=timeout)
+            response = await client.messages.create(
+                model=settings.ai_model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return (response.content[0].text if response.content else ""), None
+        except anthropic.RateLimitError:
+            last_err = "rate limit"
+            logger.warning(
+                "AI 검증 rate limit %s (시도 %d/%d)", log_context, attempt + 1, RETRY_ATTEMPTS
+            )
+        except anthropic.APITimeoutError:
+            last_err = "timeout"
+            logger.warning(
+                "AI 검증 timeout %s (시도 %d/%d)", log_context, attempt + 1, RETRY_ATTEMPTS
+            )
+        except Exception as e:
+            logger.exception("AI 검증 API 예외 %s", log_context)
+            return "", f"api error: {type(e).__name__}"
+        if attempt < RETRY_ATTEMPTS - 1:
+            await asyncio.sleep(RETRY_BACKOFF_BASE_SEC * (attempt + 1))
+    return "", last_err
 
 
 async def verify_theme_with_claude(

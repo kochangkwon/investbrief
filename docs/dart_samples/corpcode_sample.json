@@ -1,0 +1,13 @@
+{
+  "stock_code": "247540",
+  "corp_code": "01160363",
+  "corp_name": "에코프로비엠",
+  "listed_count": 3981,
+  "xml_fields": [
+    "corp_code",
+    "corp_name",
+    "corp_eng_name",
+    "stock_code",
+    "modify_date"
+  ]
+}

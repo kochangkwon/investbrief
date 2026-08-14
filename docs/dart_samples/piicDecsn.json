@@ -1,0 +1,27 @@
+{
+  "status": "000",
+  "message": "정상",
+  "list": [
+    {
+      "rcept_no": "20260630000676",
+      "corp_cls": "K",
+      "corp_code": "01160363",
+      "corp_name": "에코프로비엠",
+      "nstk_ostk_cnt": "9,900,990",
+      "nstk_estk_cnt": "-",
+      "fv_ps": "500",
+      "bfic_tisstk_ostk": "97,830,434",
+      "bfic_tisstk_estk": "-",
+      "fdpp_fclt": "150,000,000,000",
+      "fdpp_bsninh": "-",
+      "fdpp_op": "134,999,988,000",
+      "fdpp_dtrp": "-",
+      "fdpp_ocsa": "915,000,000,000",
+      "fdpp_etc": "-",
+      "ic_mthn": "주주배정후 실권주 일반공모",
+      "ssl_at": "Y",
+      "ssl_bgd": "20260701",
+      "ssl_edd": "20261012"
+    }
+  ]
+}

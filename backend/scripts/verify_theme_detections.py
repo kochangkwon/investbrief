@@ -1,16 +1,19 @@
-"""기존 theme_detection 레코드를 Claude로 재검증하고 오탐을 제거한다.
+"""활성 theme_detection 레코드를 Claude로 재검증하고 오탐을 비활성화한다.
+
+삭제하지 않고 is_active=False 로 전환해 이력을 보존한다(4월 버전은 삭제 모드였음).
+이미 비활성(is_active=False)인 레코드는 재검증 대상에서 제외한다.
 
 사용법:
-    # Dry-run (기본): 검증만, 삭제 없음
+    # Dry-run (기본): 검증만, 비활성화 없음
     python3 -m scripts.verify_theme_detections
 
-    # 삭제 포함
+    # 비활성화 포함
     python3 -m scripts.verify_theme_detections --apply
 
     # 특정 테마만
     python3 -m scripts.verify_theme_detections --theme "방산 수출 확대"
 
-리포트: docs/03-analysis/theme-cleanup-report.md
+리포트: docs/03-analysis/theme-cleanup-report-YYYYMMDD.md
 백업: backend/investbrief.db.bak-YYYYMMDD-HHMMSS
 """
 from __future__ import annotations
@@ -25,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
@@ -41,7 +44,7 @@ logger = logging.getLogger("verify_theme_detections")
 BACKEND_DIR = Path(__file__).resolve().parent.parent  # backend/
 PROJECT_ROOT = BACKEND_DIR.parent                     # project root
 DB_PATH = BACKEND_DIR / "investbrief.db"
-REPORT_PATH = PROJECT_ROOT / "docs" / "03-analysis" / "theme-cleanup-report.md"
+REPORT_DIR = PROJECT_ROOT / "docs" / "03-analysis"
 
 
 @dataclass
@@ -79,10 +82,10 @@ async def _load_all_detections(
     session: AsyncSession,
     theme_filter: Optional[str],
 ) -> list[tuple[ThemeDetection, Theme]]:
-    """전체 theme_detection + theme 조인 로드."""
+    """활성(is_active=True) theme_detection + theme 조인 로드."""
     stmt = select(ThemeDetection, Theme).join(
         Theme, Theme.id == ThemeDetection.theme_id
-    )
+    ).where(ThemeDetection.is_active.is_(True))
     if theme_filter:
         stmt = stmt.where(Theme.name == theme_filter)
     stmt = stmt.order_by(Theme.id, ThemeDetection.detected_at)
@@ -97,7 +100,7 @@ async def _verify_record(
 ) -> VerificationRecord:
     """단일 레코드 검증 — _verify_theme_match 재사용."""
     try:
-        verdict, reason = await _verify_theme_match(
+        verdict, _materiality, reason = await _verify_theme_match(
             theme_name=theme.name,
             matched_keyword=detection.matched_keyword,
             stock_name=detection.stock_name,
@@ -125,8 +128,9 @@ async def _verify_record(
 
 
 def _write_report(records: list[VerificationRecord], apply_mode: bool) -> Path:
-    """재검증 결과를 markdown으로 저장."""
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    """재검증 결과를 markdown으로 저장 (파일명에 실행 날짜 포함)."""
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = REPORT_DIR / f"theme-cleanup-report-{datetime.now().strftime('%Y%m%d')}.md"
 
     total = len(records)
     yes_count = sum(1 for r in records if r.verdict)
@@ -137,10 +141,11 @@ def _write_report(records: list[VerificationRecord], apply_mode: bool) -> Path:
     lines.append("# 테마 감지 재검증 리포트")
     lines.append("")
     lines.append(f"- 실행 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append(f"- 모드: {'APPLY (삭제 수행)' if apply_mode else 'DRY-RUN (삭제 없음)'}")
+    lines.append(f"- 모드: {'APPLY (비활성화 수행)' if apply_mode else 'DRY-RUN (비활성화 없음)'}")
+    lines.append(f"- 대상: 활성(is_active=True) 감지만")
     lines.append(f"- 총 레코드: {total}건")
     lines.append(f"- YES 판정: {yes_count}건 (유지)")
-    lines.append(f"- NO 판정: {no_count}건 (삭제 대상)")
+    lines.append(f"- NO 판정: {no_count}건 (비활성화 대상)")
     lines.append(f"- ERROR: {error_count}건 (보존 — API 장애 가능성)")
     lines.append("")
     lines.append("---")
@@ -179,34 +184,36 @@ def _write_report(records: list[VerificationRecord], apply_mode: bool) -> Path:
 
     lines.append("---")
     lines.append("")
-    lines.append("## 삭제 대상 ID 목록 (NO, ERROR 제외)")
+    lines.append("## 비활성화 대상 ID 목록 (NO, ERROR 제외)")
     lines.append("")
-    delete_ids = [r.detection_id for r in records if not r.verdict and r.error is None]
-    if delete_ids:
-        lines.append(f"총 {len(delete_ids)}건")
+    deactivate_ids = [r.detection_id for r in records if not r.verdict and r.error is None]
+    if deactivate_ids:
+        lines.append(f"총 {len(deactivate_ids)}건")
         lines.append("")
         lines.append("```")
-        lines.append(", ".join(str(i) for i in delete_ids))
+        lines.append(", ".join(str(i) for i in deactivate_ids))
         lines.append("```")
     else:
         lines.append("없음")
     lines.append("")
 
-    REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
-    return REPORT_PATH
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
 
 
-async def _delete_false_positives(
+async def _deactivate_false_positives(
     session: AsyncSession,
     records: list[VerificationRecord],
 ) -> int:
-    """NO 판정 레코드 삭제. ERROR는 보존."""
-    delete_ids = [r.detection_id for r in records if not r.verdict and r.error is None]
-    if not delete_ids:
+    """NO 판정 레코드를 is_active=False 로 비활성화(삭제 금지). ERROR는 보존."""
+    deactivate_ids = [r.detection_id for r in records if not r.verdict and r.error is None]
+    if not deactivate_ids:
         return 0
 
     result = await session.execute(
-        delete(ThemeDetection).where(ThemeDetection.id.in_(delete_ids))
+        update(ThemeDetection)
+        .where(ThemeDetection.id.in_(deactivate_ids))
+        .values(is_active=False)
     )
     await session.commit()
     return result.rowcount or 0
@@ -253,17 +260,17 @@ async def main(apply_mode: bool, theme_filter: Optional[str]) -> int:
     no_count = sum(1 for r in records if not r.verdict and r.error is None)
     error_count = sum(1 for r in records if r.error is not None)
     logger.info(
-        "요약: 총 %d건 | YES %d (유지) | NO %d (삭제대상) | ERROR %d (보존)",
+        "요약: 총 %d건 | YES %d (유지) | NO %d (비활성화대상) | ERROR %d (보존)",
         len(records), yes_count, no_count, error_count,
     )
 
-    # 6. 삭제 (apply 모드만)
+    # 6. 비활성화 (apply 모드만)
     if apply_mode:
         async with async_session() as session:
-            deleted = await _delete_false_positives(session, records)
-        logger.info("삭제 완료: %d건", deleted)
+            deactivated = await _deactivate_false_positives(session, records)
+        logger.info("비활성화 완료: %d건", deactivated)
     else:
-        logger.info("DRY-RUN — 삭제 미실행. 리포트 확인 후 --apply 로 재실행하세요.")
+        logger.info("DRY-RUN — 비활성화 미실행. 리포트 확인 후 --apply 로 재실행하세요.")
         logger.info("백업 파일: %s", backup_path)
 
     return 0
@@ -271,11 +278,11 @@ async def main(apply_mode: bool, theme_filter: Optional[str]) -> int:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="theme_detection 레코드 재검증 및 오탐 제거"
+        description="활성 theme_detection 레코드 재검증 및 오탐 비활성화(is_active=False)"
     )
     parser.add_argument(
         "--apply", action="store_true",
-        help="NO 판정 레코드를 실제로 삭제 (기본: dry-run)",
+        help="NO 판정 레코드를 실제로 비활성화 (기본: dry-run)",
     )
     parser.add_argument(
         "--theme", type=str, default=None,

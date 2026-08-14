@@ -27,6 +27,18 @@ def _is_weekday() -> bool:
     """평일 여부 (KST 기준, 토/일 제외)"""
     return datetime.now(KST).weekday() < 5
 
+async def _alert_flow_fallback(flow: dict | None) -> None:
+    """수급 폴백/전체실패 시 운영 경보 (§7.2). 성공(krx)은 침묵."""
+    source = (flow or {}).get("source")
+    if not flow or source is None:
+        await telegram_service.send_text("🛑 수급 전 소스 실패 — 브리프는 수급 없이 발송됨")
+    elif source != "krx":
+        label = {"naver": "네이버", "cache": "전일 캐시"}.get(source, source)
+        await telegram_service.send_text(
+            f"⚠️ 수급 폴백 {label} — KRX 조회 실패 (기준일 {flow.get('trade_date', '?')})"
+        )
+
+
 async def _generate_and_send():
     """매일 아침 브리프 생성 + 텔레그램 발송"""
     if not _is_weekday():
@@ -59,6 +71,7 @@ async def _generate_and_send():
                 brief.sent_at = now_kst_naive()
                 await session.commit()
                 logger.info("스케줄: 모닝브리프 완료")
+                await _alert_flow_fallback(brief.investor_flow)
             else:
                 logger.error(
                     "스케줄: 모닝브리프 발송 실패 (id=%s) — sent_at 기록 보류, 다음 스케줄에 재시도",
@@ -221,9 +234,18 @@ async def _daily_theme_scan():
             for name, count in results.items() if count
         ]
         detail = "\n" + "\n".join(hit_lines) if hit_lines else ""
-        await telegram_service.send_text(
-            f"✅ 테마 스캔 완료 — 신규 감지 {total_new}건{detail}"
+        # 검증 실패(미판정)는 조용히 소거하지 않고 표기 — 장애/무재료 구분 가능하게
+        verify_failed = theme_radar_service.last_scan_stats.get("verify_failed", 0)
+        fail_note = (
+            f"\n⚠️ 검증 실패(미판정) {verify_failed}건 — 다음 스캔에서 재시도"
+            if verify_failed else ""
         )
+        await telegram_service.send_text(
+            f"✅ 테마 스캔 완료 — 신규 감지 {total_new}건{detail}{fail_note}"
+        )
+        # 픽커 체이닝: 스캔 완료 직후 실행 (기존 08:25 고정 크론은 스캔이
+        # 6.6~11.9분 걸려 레이스가 있었음 — 지연 시 어제 후보 발송 위험)
+        await _stock_picker_run()
     except Exception:
         logger.exception("일일 테마 스캔 실패")
         await telegram_service.send_text("⚠️ 테마 스캔 중 오류가 발생했습니다.")
@@ -391,11 +413,9 @@ def start_scheduler():
         _feature_validation_check, "cron", day_of_week="mon-fri", hour=18, minute=35,
         id="feature_validation_check", replace_existing=True, misfire_grace_time=3600,
     )
-    # 오를 종목 후보 픽커 — 평일 스캔(08:10) 후 검증 신호 있으면 자동 발송
-    scheduler.add_job(
-        _stock_picker_run, "cron", day_of_week="mon-fri", hour=8, minute=25,
-        id="stock_picker_run", replace_existing=True, misfire_grace_time=600,
-    )
+    # 오를 종목 후보 픽커 — 별도 크론 없이 _daily_theme_scan 완료 직후 체이닝
+    # (고정 08:25는 스캔 소요 6.6~11.9분과 레이스 — run_and_send 내부에도
+    #  "오늘 스캔 completed + 오늘자 스냅샷" 신선도 가드가 있다)
 
     # ── v3 Phase 3: 테마 알림 D+30/60/90 가격 추적 (평일 18:05/15/25) ──
     scheduler.add_job(

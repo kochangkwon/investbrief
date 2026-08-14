@@ -1,0 +1,76 @@
+{
+  "status": "000",
+  "message": "정상",
+  "page_no": 1,
+  "page_count": 100,
+  "total_count": 6,
+  "total_page": 1,
+  "list": [
+    {
+      "corp_code": "01160363",
+      "corp_name": "에코프로비엠",
+      "stock_code": "247540",
+      "corp_cls": "K",
+      "report_nm": "주요사항보고서(유상증자결정)",
+      "rcept_no": "20260630000676",
+      "flr_nm": "에코프로비엠",
+      "rcept_dt": "20260630",
+      "rm": ""
+    },
+    {
+      "corp_code": "01160363",
+      "corp_name": "에코프로비엠",
+      "stock_code": "247540",
+      "corp_cls": "K",
+      "report_nm": "주요사항보고서(자기주식처분결정)",
+      "rcept_no": "20251118000105",
+      "flr_nm": "에코프로비엠",
+      "rcept_dt": "20251118",
+      "rm": ""
+    },
+    {
+      "corp_code": "01160363",
+      "corp_name": "에코프로비엠",
+      "stock_code": "247540",
+      "corp_cls": "K",
+      "report_nm": "주요사항보고서(자기주식처분결정)",
+      "rcept_no": "20251020000144",
+      "flr_nm": "에코프로비엠",
+      "rcept_dt": "20251020",
+      "rm": ""
+    },
+    {
+      "corp_code": "01160363",
+      "corp_name": "에코프로비엠",
+      "stock_code": "247540",
+      "corp_cls": "K",
+      "report_nm": "주요사항보고서(자본으로인정되는채무증권발행결정)",
+      "rcept_no": "20241028000373",
+      "flr_nm": "에코프로비엠",
+      "rcept_dt": "20241028",
+      "rm": ""
+    },
+    {
+      "corp_code": "01160363",
+      "corp_name": "에코프로비엠",
+      "stock_code": "247540",
+      "corp_cls": "K",
+      "report_nm": "주요사항보고서(자본으로인정되는채무증권발행결정)",
+      "rcept_no": "20241028000368",
+      "flr_nm": "에코프로비엠",
+      "rcept_dt": "20241028",
+      "rm": ""
+    },
+    {
+      "corp_code": "01160363",
+      "corp_name": "에코프로비엠",
+      "stock_code": "247540",
+      "corp_cls": "K",
+      "report_nm": "주요사항보고서(자기주식처분결정)",
+      "rcept_no": "20241022000180",
+      "flr_nm": "에코프로비엠",
+      "rcept_dt": "20241022",
+      "rm": ""
+    }
+  ]
+}

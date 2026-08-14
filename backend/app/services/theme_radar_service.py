@@ -73,6 +73,41 @@ def _is_noise_token(token: str) -> bool:
 
 _ac_cache: dict[str, list] = {}   # 종목명 → search_stocks 결과 (스캔 1회 수명)
 
+# 상장사명 화이트리스트 (stock_corp_map corp_name — 스캔 시작 시 로드).
+# _is_noise_token의 조사/숫자/금액단위 규칙이 실제 상장사(에코프로·쎄트렉아이·
+# LG디스플레이·대원 등 64+개)를 영구 차단하던 문제를 해소한다:
+# 화이트리스트에 있는 토큰은 노이즈 규칙을 건너뛴다 (STOPWORDS/GROUP은 별도).
+_listed_names: set[str] = set()
+
+
+async def _load_listed_names() -> None:
+    """stock_corp_map에서 상장사명 집합을 로드 (스캔 1회 수명)."""
+    global _listed_names
+    try:
+        from app.models.fundamental_cache import StockCorpMap
+        async with async_session() as session:
+            result = await session.execute(select(StockCorpMap.corp_name))
+            _listed_names = {n for n in result.scalars().all() if n}
+        logger.info("[radar] 상장사명 화이트리스트 로드: %d건", len(_listed_names))
+    except Exception:
+        logger.exception("[radar] 상장사명 로드 실패 — 화이트리스트 없이 진행")
+        _listed_names = set()
+
+
+def _group_prefix_is_noise(candidate: str, text: str) -> bool:
+    """그룹명 단독 토큰이 지주사 오탐인지 판정 (순수 함수).
+
+    같은 뉴스 텍스트에 그 그룹명으로 시작하는 더 긴 토큰(계열사명)이
+    함께 등장하면 — 예: "한화에어로스페이스 수주 ... 한화" — 그룹명 단독
+    토큰은 계열사 언급의 잘린 조각일 가능성이 높으므로 차단(True).
+    계열사 동반 없이 단독 등장하면 통과시켜 Claude 검증(지주사 NO 조건)에
+    위임한다 — 신세계·오리온·대상 등 사업회사 본체 복구 목적.
+    """
+    for token in STOCK_NAME_PATTERN.findall(text):
+        if token != candidate and token.startswith(candidate):
+            return True
+    return False
+
 
 async def _cached_search_stocks(name: str):
     if name in _ac_cache:
@@ -85,6 +120,14 @@ async def _cached_search_stocks(name: str):
 # 같은 종목을 이 기간 이내 다시 검증하지 않는다 (Claude API 비용 절약).
 # 윈도우가 지나면 다시 검증 → 폭등 후 정상화된 종목을 매수 적기에 재검출.
 DETECTION_WINDOW_DAYS = 14
+
+# NO 판정 재검증 윈도우 (일) — YES(14일)보다 짧게. 같은 이슈로 매일
+# 재검증하던 비용을 줄이되, 새 재료가 나오면 빠르게 재평가한다.
+NO_VERDICT_WINDOW_DAYS = 3
+
+# 스캔 1회 실행 통계 (스케줄러가 완료 메시지에 표기).
+# verify_failed: rate limit/timeout/파싱 실패로 "미판정" 처리된 후보 수.
+last_scan_stats: dict[str, int] = {"verify_failed": 0}
 
 # 본문 추출 도입 시 candidate 폭증 방지 (Claude 검증 비용 통제). 헤드라인 매칭 우선.
 MAX_CANDIDATES_PER_THEME = 30
@@ -103,11 +146,14 @@ async def _verify_theme_match(
     title: str,
     description: str = "",
     pub_date_str: Optional[str] = None,
-) -> tuple[bool, Optional[str], str]:
+) -> tuple[Optional[bool], Optional[str], str]:
     """Claude에게 "이 종목이 이 테마의 실질 수혜주인가 + 재료 중요도" 질의.
 
-    Fail-closed: API key 없음 / 예외 / 파싱 실패 → (False, None, reason).
-    Returns (verdict, materiality, reason).
+    Returns (verdict, materiality, reason):
+    - verdict True/False: 정상 판정
+    - verdict None: 검증 실패(API key 없음/rate limit/timeout/파싱 실패).
+      호출측이 "미판정"으로 처리한다 — NO로 강등하면 일시 장애가 그날
+      감지 전체를 조용히 소거하므로, 기록하지 않고 다음 스캔에서 재시도.
     """
     prompt = build_theme_verify_prompt(
         theme_name=theme_name,
@@ -117,15 +163,78 @@ async def _verify_theme_match(
         description=description,
         pub_date_str=pub_date_str,
     )
-    verdict, materiality, reason = await ai_verifier.verify_theme_with_claude(
+    return await ai_verifier.verify_theme_with_claude(
         prompt,
         log_context=f"theme={theme_name} stock={stock_name}",
     )
-    # 정책: theme_radar는 fail-closed — 검증 실패(None)는 NO로 강등
-    return (verdict is True), materiality, reason
 
 
 # ── 스캔 엔진 (스케줄러/수동 스캔 진입점) ─────────────────────────────────
+
+
+def _find_multi_theme_titles(theme_title_map: dict[Any, set[str]]) -> set[str]:
+    """복수 테마에 동시 매칭된 뉴스 제목 집합을 반환.
+
+    동일 뉴스 제목이 2개 이상 테마의 키워드에 걸리면 특정 테마의 고유 재료가
+    아니라 광범위 시황/리포트일 가능성이 높다(예: 삼성증권 대장주 리포트).
+    이런 제목은 전 테마에서 검증 대상에서 제외한다. 순수 함수(테스트 용이).
+    """
+    counts: dict[str, int] = {}
+    for titles in theme_title_map.values():
+        for title in titles:           # 테마별 set → 같은 테마 내 중복은 이미 1회
+            if not title:
+                continue
+            counts[title] = counts.get(title, 0) + 1
+    return {title for title, c in counts.items() if c >= 2}
+
+
+async def _gather_theme_news(theme: Theme) -> list[dict[str, Any]]:
+    """테마 키워드로 신선한 뉴스만 수집 (검증 전 단계 — 교차 테마 가드 입력).
+
+    _scan_single_theme의 뉴스 수집부를 분리한 것. 반환 리스트는 그대로
+    _scan_single_theme에 재사용되므로 스캔 1회당 중복 fetch가 없다.
+    """
+    keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
+    if not keywords:
+        return []
+
+    # 신선도 기준: 기본 24h, 월요일은 주말 경과분 수용 위해 72h. 0이면 필터 무효.
+    freshness_hours = settings.theme_news_freshness_hours
+    if freshness_hours > 0 and now_kst().weekday() == 0:
+        freshness_hours = max(freshness_hours, 72)
+    now = now_kst()
+
+    all_news: list[dict[str, Any]] = []
+    fresh_count = 0
+    stale_dropped = 0
+    for keyword in keywords:
+        try:
+            # display=30: 기본 10건이면 활발한 키워드(HBM 등)는 최신 몇 시간치만
+            # 커버되어 전일 장중 재료가 유실됨 — 신선도 필터(24h)를 채울 만큼 수집.
+            news_items = await _fetch_naver_news(keyword, display=30)
+        except Exception:
+            logger.exception("키워드 뉴스 수집 실패: %s", keyword)
+            continue
+        for item in news_items:
+            item["matched_keyword"] = keyword
+            pub = _parse_pub_datetime(item.get("published", ""))
+            # fail-open: pubDate 파싱 실패 시 정상 뉴스 유실 방지 (keep)
+            if (
+                freshness_hours > 0
+                and pub is not None
+                and (now - pub) > timedelta(hours=freshness_hours)
+            ):
+                stale_dropped += 1
+                continue
+            item["pub_date"] = pub.strftime("%Y-%m-%d %H:%M") if pub else None
+            fresh_count += 1
+            all_news.append(item)
+
+    logger.info(
+        "[scan_single_theme] %s 뉴스: fresh=%d stale_dropped=%d (기준 %dh)",
+        theme.name, fresh_count, stale_dropped, freshness_hours,
+    )
+    return all_news
 
 
 async def scan_all_themes() -> dict[str, int]:
@@ -137,6 +246,8 @@ async def scan_all_themes() -> dict[str, int]:
     scan_date = datetime.now(KST).date()
     results: dict[str, int] = {}
     _ac_cache.clear()   # 스캔 1회 수명 캐시 초기화 (상장/상폐 반영)
+    last_scan_stats["verify_failed"] = 0
+    await _load_listed_names()   # 노이즈 규칙 화이트리스트 (상장사명)
 
     try:
         await _start_scan_run(scan_date)
@@ -150,11 +261,35 @@ async def scan_all_themes() -> dict[str, int]:
             )
             themes = list(result.scalars().all())
 
+        # ── 교차 테마 가드 ────────────────────────────────────────────
+        # 전 테마 뉴스를 먼저 수집해 복수 테마에 동시 매칭된 제목을 산출하고,
+        # 해당 제목은 모든 테마에서 검증 대상에서 제외한다(광범위 시황/리포트 오탐 차단).
+        theme_news_map: dict[int, list[dict[str, Any]]] = {}
+        for theme in themes:
+            try:
+                theme_news_map[theme.id] = await _gather_theme_news(theme)
+            except Exception:
+                logger.exception("테마 뉴스 수집 실패: %s", theme.name)
+                theme_news_map[theme.id] = []
+        banned_titles = _find_multi_theme_titles({
+            tid: {n.get("title", "") for n in news if n.get("title")}
+            for tid, news in theme_news_map.items()
+        })
+        if banned_titles:
+            logger.info(
+                "[cross_theme_guard] 복수 테마 매칭 제목 %d건 → 전 테마 검증 제외",
+                len(banned_titles),
+            )
+
         total_stocks = 0
         for theme in themes:
             try:
                 async with async_session() as session:
-                    count = await _scan_single_theme(session, theme, scan_date=scan_date)
+                    count = await _scan_single_theme(
+                        session, theme, scan_date=scan_date,
+                        all_news=theme_news_map.get(theme.id),
+                        banned_titles=banned_titles,
+                    )
                 results[theme.name] = count
                 total_stocks += count
             except Exception:
@@ -182,15 +317,18 @@ async def _verify_and_persist_detections(
     detected_stocks: dict[str, dict[str, Any]],
     existing_codes: set[str],
 ) -> list[dict[str, Any]]:
-    """Claude 검증 통과 종목만 ThemeDetection으로 저장하고 통과분 반환.
+    """Claude 검증 결과를 ThemeDetection으로 저장하고 통과분(YES) 반환.
 
     - existing_codes에 이미 있는 종목은 검증 스킵 (중복 윈도우)
-    - 검증 실패(None/False)는 fail-closed로 제외
+    - NO 판정도 verdict="NO"로 기록 → NO_VERDICT_WINDOW_DAYS간 재검증 스킵
+      (기존에는 NO 미기록 → 지속 이슈 종목을 매일 재검증 + 판정 플립 측정 불가)
+    - 검증 실패(None)는 "미판정" — 기록하지 않고 카운트만 (다음 스캔 재시도)
     - DB commit 실패 시 rollback 후 빈 리스트 반환
     """
     new_detections: list[dict[str, Any]] = []
     rejected_no = 0
     rejected_low = 0
+    verify_failed = 0
     for stock_code, info in detected_stocks.items():
         if stock_code in existing_codes:
             continue
@@ -206,20 +344,28 @@ async def _verify_and_persist_detections(
         logger.info(
             "테마 검증: theme=%s stock=%s(%s) verdict=%s materiality=%s reason=%s",
             theme.name, info["stock_name"], stock_code,
-            "YES" if verdict else "NO", materiality, reason,
+            "YES" if verdict is True else ("NO" if verdict is False else "미판정"),
+            materiality, reason,
         )
-        if not verdict:
-            rejected_no += 1
+        if verdict is None:
+            # 일시 장애/파싱 실패 — NO로 강등하지 않는다 (조용한 전멸 방지).
+            verify_failed += 1
             continue
+
         # 중요도 판정: strict 모드에서 LOW는 탈락. 파싱 실패(None)는 통과(보수적 신규 축).
-        if settings.theme_verify_strict and materiality == "LOW":
+        is_low_reject = (
+            verdict and settings.theme_verify_strict and materiality == "LOW"
+        )
+        if is_low_reject:
             rejected_low += 1
             logger.info(
                 "[materiality] LOW 탈락: theme=%s stock=%s reason=%s",
                 theme.name, info["stock_name"], reason,
             )
-            continue
+        elif not verdict:
+            rejected_no += 1
 
+        final_verdict = "YES" if (verdict and not is_low_reject) else "NO"
         detection = ThemeDetection(
             theme_id=theme.id,
             stock_code=stock_code,
@@ -228,16 +374,19 @@ async def _verify_and_persist_detections(
             matched_keyword=info["matched_keyword"],
             news_url=info["url"],
             prompt_version=PROMPT_VERSION,
+            verdict=final_verdict,
         )
         session.add(detection)
-        info["materiality"] = materiality
-        new_detections.append(info)
+        if final_verdict == "YES":
+            info["materiality"] = materiality
+            new_detections.append(info)
 
-    if rejected_no or rejected_low:
+    if rejected_no or rejected_low or verify_failed:
         logger.info(
-            "[verify] %s 탈락 분포: NO=%d, materiality_LOW=%d",
-            theme.name, rejected_no, rejected_low,
+            "[verify] %s 탈락 분포: NO=%d, materiality_LOW=%d, 미판정=%d",
+            theme.name, rejected_no, rejected_low, verify_failed,
         )
+    last_scan_stats["verify_failed"] += verify_failed
 
     try:
         await session.commit()
@@ -253,53 +402,28 @@ async def _scan_single_theme(
     session: AsyncSession,
     theme: Theme,
     scan_date: Optional[date] = None,
+    all_news: Optional[list[dict[str, Any]]] = None,
+    banned_titles: Optional[set[str]] = None,
 ) -> int:
-    """단일 테마 스캔 — 신규 감지 종목 수 반환"""
-    keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
-    if not keywords:
-        return 0
+    """단일 테마 스캔 — 신규 감지 종목 수 반환.
 
-    # 신선도 기준: 기본 24h, 월요일은 주말 경과분 수용 위해 72h. 0이면 필터 무효.
-    freshness_hours = settings.theme_news_freshness_hours
-    if freshness_hours > 0 and now_kst().weekday() == 0:
-        freshness_hours = max(freshness_hours, 72)
-    now = now_kst()
-
-    all_news: list[dict[str, Any]] = []
-    fresh_count = 0
-    stale_dropped = 0
-    for keyword in keywords:
-        try:
-            news_items = await _fetch_naver_news(keyword)
-        except Exception:
-            logger.exception("키워드 뉴스 수집 실패: %s", keyword)
-            continue
-        for item in news_items:
-            item["matched_keyword"] = keyword
-            pub = _parse_pub_datetime(item.get("published", ""))
-            # fail-open: pubDate 파싱 실패 시 정상 뉴스 유실 방지 (keep)
-            if (
-                freshness_hours > 0
-                and pub is not None
-                and (now - pub) > timedelta(hours=freshness_hours)
-            ):
-                stale_dropped += 1
-                continue
-            item["pub_date"] = pub.strftime("%Y-%m-%d %H:%M") if pub else None
-            fresh_count += 1
-            all_news.append(item)
-
-    logger.info(
-        "[scan_single_theme] %s 뉴스: fresh=%d stale_dropped=%d (기준 %dh)",
-        theme.name, fresh_count, stale_dropped, freshness_hours,
-    )
+    all_news가 주어지면 재사용(교차 테마 가드 경로), 없으면 자체 수집.
+    banned_titles(복수 테마 동시 매칭 제목)에 속한 뉴스는 검증 대상에서 제외.
+    """
+    if all_news is None:
+        all_news = await _gather_theme_news(theme)
+    banned_titles = banned_titles or set()
 
     if not all_news:
         return 0
 
     detected_stocks: dict[str, dict[str, Any]] = {}
+    banned_skipped = 0
     for news in all_news:
         title = news.get("title", "")
+        if title in banned_titles:   # 복수 테마 매칭 제목 → 전 테마 검증 제외
+            banned_skipped += 1
+            continue
         description = news.get("description", "")
         combined_text = f"{title} {description[:200]}"
         candidates = set(STOCK_NAME_PATTERN.findall(combined_text))
@@ -308,9 +432,15 @@ async def _scan_single_theme(
                 continue
             if candidate in STOPWORDS:            # 불용어 차단 (호출 전)
                 continue
-            if candidate in GROUP_PREFIX_NAMES:   # 지주사 오탐 차단
+            # 그룹명 단독: 계열사명이 같은 뉴스에 동반될 때만 차단.
+            # 단독 등장(신세계·오리온·대상 등 사업회사 본체)은 Claude 검증에 위임.
+            if candidate in GROUP_PREFIX_NAMES and _group_prefix_is_noise(
+                candidate, combined_text
+            ):
                 continue
-            if _is_noise_token(candidate):        # 숫자/금액/조사/HTML잔재 차단
+            # 숫자/금액/조사/HTML잔재 차단 — 단, 상장사명 화이트리스트는 예외
+            # (에코프로·쎄트렉아이·LG디스플레이·대원 등 조사·단위 규칙 오차단 복구)
+            if candidate not in _listed_names and _is_noise_token(candidate):
                 continue
 
             try:
@@ -336,9 +466,16 @@ async def _scan_single_theme(
                     "pub_date": news.get("pub_date"),
                 }
 
+    if banned_skipped:
+        logger.info(
+            "[cross_theme_guard] %s: 복수 테마 매칭 제목 %d건 검증 제외",
+            theme.name, banned_skipped,
+        )
+
     # ── DART 🟢 호재 공시 추출 (테마 키워드가 공시 제목에 포함된 것만) ──
     # DART는 stock_code를 직접 제공 → 네이버 AC 역추적·정확일치 필터 불필요(이미 정확).
     # 단, 이후 Claude 검증 + prefilter는 뉴스 추출분과 동일하게 통과한다.
+    keywords = [k.strip() for k in theme.keywords.split(",") if k.strip()]
     try:
         from app.collectors import dart_collector
         disclosures = await dart_collector.get_today_disclosures(target_date=scan_date)
@@ -400,16 +537,24 @@ async def _scan_single_theme(
             theme.name, MAX_CANDIDATES_PER_THEME,
         )
 
-    # 중복 검증 윈도우 — DETECTION_WINDOW_DAYS 이내 검증한 종목만 SKIP.
+    # 중복 검증 윈도우 — YES(NULL 포함 레거시)는 DETECTION_WINDOW_DAYS,
+    # NO는 NO_VERDICT_WINDOW_DAYS(짧게)만 재검증을 스킵.
     # 그 이전 레코드는 무시 → 폭등 후 RSI 정상화된 종목을 매수 적기에 재검증.
     cutoff = now_kst_naive() - timedelta(days=DETECTION_WINDOW_DAYS)
+    no_cutoff = now_kst_naive() - timedelta(days=NO_VERDICT_WINDOW_DAYS)
     existing_result = await session.execute(
-        select(ThemeDetection.stock_code)
+        select(ThemeDetection.stock_code, ThemeDetection.verdict, ThemeDetection.detected_at)
         .where(ThemeDetection.theme_id == theme.id)
         .where(ThemeDetection.detected_at >= cutoff)
         .where(ThemeDetection.is_active.is_(True))
     )
-    existing_codes = set(existing_result.scalars().all())
+    existing_codes = set()
+    for code, verdict, detected_at in existing_result.all():
+        if verdict == "NO":
+            if detected_at is not None and detected_at >= no_cutoff:
+                existing_codes.add(code)
+        else:  # "YES" 또는 NULL(레거시 = YES)
+            existing_codes.add(code)
 
     new_detections = await _verify_and_persist_detections(
         session, theme, detected_stocks, existing_codes,
@@ -766,6 +911,11 @@ async def list_themes(session: AsyncSession) -> list[dict[str, Any]]:
             select(ThemeDetection)
             .where(ThemeDetection.theme_id == t.id)
             .where(ThemeDetection.is_active.is_(True))
+            # NO 판정 기록은 감지 수에서 제외 (NULL=레거시 YES)
+            .where(
+                (ThemeDetection.verdict.is_(None))
+                | (ThemeDetection.verdict != "NO")
+            )
         )
         detected_count = len(list(count_result.scalars().all()))
         output.append({
