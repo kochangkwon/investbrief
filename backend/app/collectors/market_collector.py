@@ -132,25 +132,32 @@ async def get_global_summary(target_date: date | None = None) -> dict[str, Any]:
     return result
 
 
-# 위험진단 필수 축 — 네이버 폴백 대상 (Finnhub 무료는 ETF만이라 대체 불가)
-NAVER_FALLBACK_KEYS = ("vix", "usdkrw")
+# 네이버 폴백 대상 — vix·usdkrw는 위험진단 필수 축(Finnhub로 대체 불가),
+# 지수는 ETF 프록시보다 정확해서 우선 시도한다.
+NAVER_FALLBACK_KEYS = (
+    "vix", "usdkrw", "sp500", "nasdaq", "dow", "nikkei", "shanghai",
+)
 
 
 async def _apply_fallbacks(result: dict[str, Any]) -> dict[str, Any]:
-    """결손 키를 독립 소스로 채운다 — Finnhub ETF 프록시 → 네이버 순.
+    """결손 키를 독립 소스로 채운다 — 네이버(실측) → Finnhub ETF 프록시 순.
 
+    네이버를 먼저 두는 이유: 프록시는 SPY/QQQ/DIA **ETF 가격**이라 지수
+    실측치와 자릿수가 달라(예: S&P 500을 763으로 표기) 독자가 오인한다.
+    네이버가 지수 실측치를 주면 프록시는 자연히 건너뛴다(키 선점).
     둘 다 키 단위로 동작하므로 전멸·부분실패 어느 쪽이든 안전하다.
     """
-    result = await _apply_finnhub_proxies(result)
-    result = await _apply_naver_fallbacks(result)
+    result = await _apply_naver_fallbacks(result)      # 실측 지수·VIX·환율
+    result = await _apply_finnhub_proxies(result)      # 남은 지수만 ETF 대용
     return result
 
 
 async def _apply_naver_fallbacks(result: dict[str, Any]) -> dict[str, Any]:
-    """VIX·환율을 네이버로 채운다 (위험진단 2축 복구).
+    """VIX·환율·지수를 네이버로 채운다 (위험진단 2축 복구 + 지수 실측화).
 
     yfinance와 FDR이 모두 Yahoo 백엔드라 동시에 죽는 구조라서, 네이버가
-    현재 유일한 독립 소스다. label에 출처를 명시해 실측치와 구분한다.
+    현재 유일한 독립 소스다. label에 출처를 명시해 1차 소스와 구분한다.
+    미확인 코드(지수)는 실패해도 조용히 다음 폴백으로 넘어간다.
     """
     filled = 0
     for key in NAVER_FALLBACK_KEYS:

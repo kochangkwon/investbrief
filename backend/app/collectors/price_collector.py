@@ -273,21 +273,33 @@ def fetch_market_cap(stock_code: str) -> Optional[int]:
 # 독립 소스다. VIX·환율은 Finnhub 무료 플랜(ETF 전용)으로도 대체 불가라
 # 위험진단 2축이 통째로 사라지는 원인이었다.
 #
-# 엔드포인트는 격리 환경에서 실측 확정이 불가능했으므로 후보를 순차 시도하고
-# 성공한 URL을 프로세스 수명 동안 기억한다. 실제 확인:
-#     python3 scripts/probe_naver_global.py
+# 엔드포인트 실측 확정 (2026-08-25, scripts/probe_naver_global.py):
+#   VIX  → api.stock.naver.com/index/.VIX/price          ✅ 15.85 확인
+#   환율 → api.stock.naver.com/marketindex/exchange/...  ✅ 1,381.90 확인
+#   (m.stock.naver.com/api/index/{code} 는 해외 코드에 400, CBOE@VIX 는 409)
+# 지수는 VIX와 동일 패턴(worldIndexSymbol 체계)이라 같은 엔드포인트를 쓴다 —
+# 미확인 코드는 실패 시 조용히 다음 폴백(Finnhub 프록시)으로 넘어간다.
+#
+# ※ 등락률은 응답의 fluctuationsRatio를 쓰지 않고 최근 2개 종가로 직접 계산한다.
+#   네이버의 fluctuationsRatio는 부호 없는 절대값이고 방향이 별도 필드
+#   (compareToPreviousPrice.code == "5" 이면 하락)로 오기 때문에, 그대로 쓰면
+#   하락을 상승으로 표시하는 사고가 난다. 종가 차분은 그 함정이 없다.
+_NAVER_INDEX_PRICE = "https://api.stock.naver.com/index/{code}/price?pageSize=5&page=1"
+
 _NAVER_GLOBAL_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "vix": (
-        "https://m.stock.naver.com/api/index/.VIX/price?pageSize=5&page=1",
-        "https://api.stock.naver.com/index/.VIX/price?pageSize=5&page=1",
-        "https://api.stock.naver.com/index/CBOE@VIX/price?pageSize=5&page=1",
-    ),
+    # 위험진단 필수 축 (실측 확정)
+    "vix": (_NAVER_INDEX_PRICE.format(code=".VIX"),),
     "usdkrw": (
-        "https://m.stock.naver.com/front-api/marketIndex/prices"
-        "?category=exchange&reutersCode=FX_USDKRW&page=1&pageSize=5",
         "https://api.stock.naver.com/marketindex/exchange/FX_USDKRW/prices"
         "?page=1&pageSize=5",
     ),
+    # 지수 — Finnhub ETF 프록시(SPY/QQQ/DIA)보다 우선한다. 프록시는 ETF
+    # 가격이라 지수 실측치와 자릿수가 달라 독자가 오인할 수 있다.
+    "sp500": (_NAVER_INDEX_PRICE.format(code=".INX"),),
+    "nasdaq": (_NAVER_INDEX_PRICE.format(code=".IXIC"),),
+    "dow": (_NAVER_INDEX_PRICE.format(code=".DJI"),),
+    "nikkei": (_NAVER_INDEX_PRICE.format(code=".N225"),),
+    "shanghai": (_NAVER_INDEX_PRICE.format(code=".SSEC"),),
 }
 
 # kind -> 성공한 URL (프로세스 수명 — 매번 전 후보를 훑지 않도록)

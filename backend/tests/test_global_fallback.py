@@ -65,6 +65,56 @@ def test_sorted_closes_drops_unparseable():
     assert _naver_sorted_closes(rows) == [10.0, 20.0]
 
 
+# ── 실측 확정 스키마 픽스처 (2026-08-25 probe 결과) ──────────────────
+# 네이버 응답 필드가 바뀌면 여기서 먼저 깨진다.
+
+_VIX_FIXTURE = [
+    {"closePrice": "15.85", "localTradedAt": "2026-08-25",
+     "fluctuationsRatio": "4.76", "compareToPreviousClosePrice": "0.72",
+     "compareToPreviousPrice": {"code": "2", "text": "상승"},
+     "worldIndexSymbol": ".VIX", "stockExchangeType": "CBOE"},
+    {"closePrice": "15.13", "localTradedAt": "2026-08-22",
+     "fluctuationsRatio": "5.49", "worldIndexSymbol": ".VIX"},
+    {"closePrice": "16.01", "localTradedAt": "2026-08-21",
+     "fluctuationsRatio": "1.20", "worldIndexSymbol": ".VIX"},
+]
+
+_USDKRW_FIXTURE = [
+    {"closePrice": "1,381.90", "localTradedAt": "2026-08-25",
+     "fluctuationsRatio": "0.15", "fluctuationsType": {"code": "5", "text": "하락"},
+     "cashBuyValue": "1,406.06", "cashSellValue": "1,357.74"},
+    {"closePrice": "1,384.00", "localTradedAt": "2026-08-22",
+     "fluctuationsRatio": "0.22"},
+    {"closePrice": "1,387.00", "localTradedAt": "2026-08-21"},
+]
+
+
+def test_vix_fixture_parses_to_confirmed_value():
+    closes = _naver_sorted_closes(_naver_rows(_VIX_FIXTURE))
+    assert closes[:3] == [15.85, 15.13, 16.01]   # probe 실측과 일치
+
+
+def test_usdkrw_fixture_parses_to_confirmed_value():
+    closes = _naver_sorted_closes(_naver_rows(_USDKRW_FIXTURE))
+    assert closes[:3] == [1381.9, 1384.0, 1387.0]
+
+
+def test_change_pct_computed_from_closes_not_ratio_field():
+    """등락률은 종가 차분으로 계산해야 한다 — 부호 함정 회피.
+
+    네이버 fluctuationsRatio는 **부호 없는 절대값**이고 방향은 별도 필드로
+    온다(환율 픽스처: ratio 0.15인데 실제로는 하락). 그 필드를 그대로 쓰면
+    하락을 +0.15%로 표시하는 사고가 난다.
+    """
+    closes = _naver_sorted_closes(_naver_rows(_USDKRW_FIXTURE))
+    computed = (closes[0] - closes[1]) / closes[1] * 100
+    assert round(computed, 2) == -0.15                      # 하락으로 정확히 계산
+    assert float(_USDKRW_FIXTURE[0]["fluctuationsRatio"]) == 0.15   # 원본은 부호 없음
+
+    vix_closes = _naver_sorted_closes(_naver_rows(_VIX_FIXTURE))
+    assert round((vix_closes[0] - vix_closes[1]) / vix_closes[1] * 100, 2) == 4.76
+
+
 # ── P3: 경보는 개수가 아니라 "위험진단 가능 여부" 기준 ────────────────
 
 
