@@ -267,9 +267,144 @@ def fetch_market_cap(stock_code: str) -> Optional[int]:
     return result
 
 
+# ── 글로벌 지표 네이버 폴백 (P2) ────────────────────────────────────
+# yfinance와 FDR 해외지표는 **둘 다 query2.finance.yahoo.com**을 백엔드로 쓴다
+# (실측 확인). 따라서 Yahoo가 막히면 동시에 죽는다 — 네이버가 현재 유일한
+# 독립 소스다. VIX·환율은 Finnhub 무료 플랜(ETF 전용)으로도 대체 불가라
+# 위험진단 2축이 통째로 사라지는 원인이었다.
+#
+# 엔드포인트는 격리 환경에서 실측 확정이 불가능했으므로 후보를 순차 시도하고
+# 성공한 URL을 프로세스 수명 동안 기억한다. 실제 확인:
+#     python3 scripts/probe_naver_global.py
+_NAVER_GLOBAL_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "vix": (
+        "https://m.stock.naver.com/api/index/.VIX/price?pageSize=5&page=1",
+        "https://api.stock.naver.com/index/.VIX/price?pageSize=5&page=1",
+        "https://api.stock.naver.com/index/CBOE@VIX/price?pageSize=5&page=1",
+    ),
+    "usdkrw": (
+        "https://m.stock.naver.com/front-api/marketIndex/prices"
+        "?category=exchange&reutersCode=FX_USDKRW&page=1&pageSize=5",
+        "https://api.stock.naver.com/marketindex/exchange/FX_USDKRW/prices"
+        "?page=1&pageSize=5",
+    ),
+}
+
+# kind -> 성공한 URL (프로세스 수명 — 매번 전 후보를 훑지 않도록)
+_naver_global_winner: dict[str, str] = {}
+
+_NAVER_ROW_CONTAINERS = ("result", "datas", "priceList", "prices", "list")
+_NAVER_CLOSE_FIELDS = ("closePrice", "closeprice", "nv", "price", "value")
+_NAVER_DATE_FIELDS = ("localTradedAt", "localTradedAtDate", "dt", "date")
+
+
+def _naver_rows(payload: Any) -> list[dict[str, Any]]:
+    """네이버 응답에서 시세 행 리스트 추출 (스키마 변형 흡수, 순수 함수).
+
+    list / {"result": [...]} / {"result": {"datas": [...]}} 등을 모두 처리한다.
+    """
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if isinstance(payload, dict):
+        for key in _NAVER_ROW_CONTAINERS:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [r for r in value if isinstance(r, dict)]
+            if isinstance(value, dict):
+                for inner in _NAVER_ROW_CONTAINERS:
+                    nested = value.get(inner)
+                    if isinstance(nested, list):
+                        return [r for r in nested if isinstance(r, dict)]
+    return []
+
+
+def _naver_row_close(row: dict[str, Any]) -> Optional[float]:
+    """행에서 종가 추출 ('1,350.50' 같은 문자열 포함). 순수 함수."""
+    for field in _NAVER_CLOSE_FIELDS:
+        raw = row.get(field)
+        if raw is None:
+            continue
+        try:
+            value = float(str(raw).replace(",", "").strip())
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _naver_sorted_closes(rows: list[dict[str, Any]]) -> list[float]:
+    """최신순 종가 리스트. 날짜 필드가 있으면 내림차순 정렬 (순수 함수)."""
+    def _date_key(row: dict[str, Any]) -> str:
+        for field in _NAVER_DATE_FIELDS:
+            value = row.get(field)
+            if value:
+                return str(value)
+        return ""
+
+    if any(_date_key(r) for r in rows):
+        rows = sorted(rows, key=_date_key, reverse=True)
+    closes = [_naver_row_close(r) for r in rows]
+    return [c for c in closes if c is not None]
+
+
+def fetch_naver_global_quote(kind: str) -> Optional[dict[str, float]]:
+    """네이버로 글로벌 지표 종가·등락 조회. 실패 시 None (0.0 채움 금지).
+
+    Args:
+        kind: "vix" | "usdkrw" (_NAVER_GLOBAL_CANDIDATES 키)
+
+    Returns:
+        {"close": float, "change": float, "change_pct": float} or None
+    """
+    candidates = _NAVER_GLOBAL_CANDIDATES.get(kind)
+    if not candidates:
+        return None
+
+    winner = _naver_global_winner.get(kind)
+    ordered = (
+        (winner,) + tuple(c for c in candidates if c != winner)
+        if winner else candidates
+    )
+
+    for url in ordered:
+        try:
+            resp = httpx.get(url, headers=_NAVER_MCAP_HEADERS, timeout=8.0)
+            resp.raise_for_status()
+            closes = _naver_sorted_closes(_naver_rows(resp.json()))
+        except Exception as e:
+            logger.debug("[naver-global] %s 후보 실패 (%s): %s", kind, url, e)
+            continue
+        if not closes:
+            continue
+
+        close = closes[0]
+        if len(closes) >= 2:
+            prev = closes[1]
+            change = close - prev
+            change_pct = (change / prev) * 100
+        else:
+            change = 0.0
+            change_pct = 0.0
+
+        _naver_global_winner[kind] = url
+        logger.info(
+            "[naver-global] %s 확보: %.2f (%+.2f%%)", kind, close, change_pct
+        )
+        return {
+            "close": round(close, 2),
+            "change": round(change, 2),
+            "change_pct": round(change_pct, 2),
+        }
+
+    logger.warning("[naver-global] %s 전 후보 실패 — 폴백 불가", kind)
+    return None
+
+
 __all__ = [
     "fetch_close_history",
     "fetch_last_close",
     "fetch_close_with_change",
     "fetch_market_cap",
+    "fetch_naver_global_quote",
 ]

@@ -27,21 +27,46 @@ def _is_weekday() -> bool:
     """평일 여부 (KST 기준, 토/일 제외)"""
     return datetime.now(KST).weekday() < 5
 
-async def _alert_global_market_failure(global_market: dict | None) -> None:
-    """글로벌 시장 수집 실패 운영 경보 (F2).
+# 위험진단이 성립하려면 반드시 필요한 축 (개수보다 이게 본질)
+ESSENTIAL_GLOBAL_KEYS = ("vix", "usdkrw")
 
-    2026-08-10~08-14 yfinance 장애 5거래일을 아무도 모르고 지나간 재발 방지 —
-    _safe_collect의 조용한 격리를 경보로 보완한다. 정상(8종+)은 침묵.
+
+def _global_market_alert_text(global_market: dict | None) -> str | None:
+    """글로벌 수집 상태 → 경보 문구 (없으면 None). 순수 함수 — 테스트용 분리.
+
+    P3: 개수 기준(n<5)은 yfinance 상시 실패 환경에서 매일 발동해 알림 피로를
+    유발했다. "몇 종 받았나"가 아니라 "위험진단이 가능한가"로 판정한다.
     """
-    n = len(global_market or {})
-    if n == 0:
-        await telegram_service.send_text(
+    gm = global_market or {}
+    if not gm:
+        return (
             "🛑 글로벌 시장 수집 전멸 — 브리프가 글로벌 데이터 없이 발송됨 "
             "(VIX·환율 리스크 시그널 침묵 중)"
         )
-    elif n < 5:
-        await telegram_service.send_text(
-            f"⚠️ 글로벌 시장 수집 부분 실패 — {n}/10종만 확보 (프록시 포함)"
+    missing = [k for k in ESSENTIAL_GLOBAL_KEYS if k not in gm]
+    if missing:
+        label = {"vix": "VIX", "usdkrw": "환율"}
+        names = ", ".join(label.get(k, k) for k in missing)
+        return (
+            f"⚠️ 위험진단 축 결손: {names} 없음 — 시장 위험 모드 판정불가 "
+            f"(수집 {len(gm)}/10종)"
+        )
+    return None  # 필수 축 확보 — 개수 부족은 로그만
+
+
+async def _alert_global_market_failure(global_market: dict | None) -> None:
+    """글로벌 시장 수집 실패 운영 경보 (F2 + P3 임계값 재설계).
+
+    2026-08-10~08-14 yfinance 장애 5거래일을 아무도 모르고 지나간 재발 방지.
+    필수 축(VIX·환율)이 확보되면 침묵한다.
+    """
+    text = _global_market_alert_text(global_market)
+    if text:
+        await telegram_service.send_text(text)
+    else:
+        logger.info(
+            "글로벌 시장 필수 축 확보 (%d/10종) — 경보 없음",
+            len(global_market or {}),
         )
 
 
