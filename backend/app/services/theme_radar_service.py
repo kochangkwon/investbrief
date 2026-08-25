@@ -23,7 +23,12 @@ from app.models.theme import (
 )
 from app.services import ai_verifier, telegram_service
 from app.services.prefilter_service import PrefilterResult, prefilter_stocks
-from app.services.stock_name_rules import GROUP_PREFIX_NAMES, STOPWORDS
+from app.services.stock_name_rules import (
+    AMBIGUOUS_COMMON_NOUN_NAMES,
+    GROUP_PREFIX_NAMES,
+    STOPWORDS,
+    ambiguous_name_lacks_company_context,
+)
 from app.services.verify_prompts import build_theme_verify_prompt
 from app.utils.timezone import now_kst, now_kst_naive
 
@@ -589,6 +594,12 @@ async def _scan_single_theme(
             if candidate in GROUP_PREFIX_NAMES and _group_prefix_is_noise(
                 candidate, combined_text
             ):
+                continue
+            # 일반명사 동철 종목명("대상"=對象 등): 회사 문맥 증거 없으면 차단.
+            # Claude 검증 위임은 이 이름들에겐 도박이다 — 일상어로 매일 매칭되어
+            # 검증 1회 실패가 곧 오등록이 된다 (2026-08-26 대상/기술수출 실사고).
+            if (candidate in AMBIGUOUS_COMMON_NOUN_NAMES
+                    and ambiguous_name_lacks_company_context(candidate, combined_text)):
                 continue
             # 숫자/금액/조사/HTML잔재 차단 — 단, 상장사명 화이트리스트는 예외
             # (에코프로·쎄트렉아이·LG디스플레이·대원 등 조사·단위 규칙 오차단 복구)
