@@ -34,7 +34,18 @@ GROUP_PREFIX_NAMES = {
 # 너무 높으므로, 추출 단계에서 "회사 문맥" 증거를 요구한다.
 import re as _re
 
-AMBIGUOUS_COMMON_NOUN_NAMES = {"대상", "동원"}
+# 2026-08-26 사고 후 실측 확장 (theme_detection verdict 통계 + 오추출 문맥 확인).
+# 판정 근거는 "NO 누적 + 여러 테마에 무차별 매칭 + 헤드라인이 아닌 본문에서 추출".
+# 신규 후보는 추측하지 말고 scripts/surface_ambiguous_names.py 로 산출할 것.
+AMBIGUOUS_COMMON_NOUN_NAMES = {
+    "대상",      # 對象 — NO 18건/11개 테마. "환자를 대상으로", "상장사 대상" (실사고)
+    "동원",      # 動員 — "자금 동원", "총동원"
+    "전방",      # 前方 — NO 6건/5개 테마. "전방 산업", "전방 시장" (산업 기사 상용구)
+    "나노",      # nano — NO 6건/5개 테마. "2나노", "나노 기술"
+    "신원",      # 身元 — NO 4건. "해커 신원 공개"
+    "미래산업",  # NO 7건. "미래 산업 육성" (단, 공시 목록의 실제 회사 언급은 쉼표 규칙으로 통과)
+    "한창",      # 한창(부사) — "한창 진행 중"
+}
 
 
 def ambiguous_name_lacks_company_context(name: str, text: str) -> bool:
