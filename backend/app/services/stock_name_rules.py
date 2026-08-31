@@ -19,6 +19,9 @@ STOPWORDS = {
 
 # 한국 주요 그룹명 — 단독 등장 시 지주사로 잘못 매핑되므로 차단
 # (그룹명 + 후속 단어 결합한 종목명은 정상 매칭됨, 예: "한화에어로스페이스")
+# radar: 계열사 토큰 동반 차단(_group_prefix_is_noise)에 더해, 2026-09-01
+# 효성 실사고("HD현대·효성" — 계열사명이 줄임 표기로만 존재해 동반 차단이
+# 뚫림) 이후 ambiguous_name_lacks_company_context의 회사 문맥 증거도 요구한다.
 GROUP_PREFIX_NAMES = {
     "삼성", "LG", "현대", "SK", "롯데", "한화", "한국", "GS",
     "CJ", "두산", "포스코", "효성", "한진", "신세계", "농심",
@@ -49,7 +52,10 @@ AMBIGUOUS_COMMON_NOUN_NAMES = {
 
 
 def ambiguous_name_lacks_company_context(name: str, text: str) -> bool:
-    """일반명사 동철 종목명이 '회사'로서 언급됐는지 판정. True = 회사 문맥 없음(차단).
+    """이름이 '회사'로서 언급됐는지 판정. True = 회사 문맥 없음(차단).
+
+    적용 대상: AMBIGUOUS_COMMON_NOUN_NAMES(일반명사 동철) +
+    GROUP_PREFIX_NAMES(그룹명 단독 토큰, 2026-09-01 효성 사고 이후).
 
     회사 문맥으로 인정하는 증거 2가지:
       ① 회사 접미 결합: "대상그룹", "대상홀딩스", "대상㈜", "대상(주)"
@@ -62,7 +68,9 @@ def ambiguous_name_lacks_company_context(name: str, text: str) -> bool:
     """
     if _re.search(_re.escape(name) + r"\s?(그룹|홀딩스|㈜|\(주\))", text):
         return False
-    if _re.search(r"(?:^|[\s\[\]\"'\u2018\u2019\u201c\u201d\u300c\u300e])"
+    # 경계에 말줄임표(…/⋯/...)·마침표 포함 — "면세점까지 흑자 전환…신세계, 3분기"
+    # 처럼 헤드라인 관례상 말줄임 뒤 주어가 오는 실측 정상 기사 미탐 방지 (2026-09-01).
+    if _re.search(r"(?:^|[\s\[\]\"'\u2018\u2019\u201c\u201d\u300c\u300e\u2026\u22ef.])"
                   + _re.escape(name) + r"\s*,", text):
         return False
     return True

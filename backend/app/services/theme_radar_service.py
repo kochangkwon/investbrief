@@ -138,8 +138,9 @@ def _group_prefix_is_noise(candidate: str, text: str) -> bool:
     같은 뉴스 텍스트에 그 그룹명으로 시작하는 더 긴 토큰(계열사명)이
     함께 등장하면 — 예: "한화에어로스페이스 수주 ... 한화" — 그룹명 단독
     토큰은 계열사 언급의 잘린 조각일 가능성이 높으므로 차단(True).
-    계열사 동반 없이 단독 등장하면 통과시켜 Claude 검증(지주사 NO 조건)에
-    위임한다 — 신세계·오리온·대상 등 사업회사 본체 복구 목적.
+    계열사 동반 없이 단독 등장하면 여기서는 통과시키되, 추출 루프의
+    후속 가드(회사 문맥 증거 요구)가 한 번 더 거른다 — 헤드라인이
+    계열사명을 그룹명으로 줄여 쓰는 케이스(2026-09-01 효성 실사고) 방어.
     """
     for token in STOCK_NAME_PATTERN.findall(text):
         if token != candidate and token.startswith(candidate):
@@ -595,10 +596,15 @@ async def _scan_single_theme(
                 candidate, combined_text
             ):
                 continue
-            # 일반명사 동철 종목명("대상"=對象 등): 회사 문맥 증거 없으면 차단.
-            # Claude 검증 위임은 이 이름들에겐 도박이다 — 일상어로 매일 매칭되어
-            # 검증 1회 실패가 곧 오등록이 된다 (2026-08-26 대상/기술수출 실사고).
-            if (candidate in AMBIGUOUS_COMMON_NOUN_NAMES
+            # 일반명사 동철 종목명("대상"=對象 등) + 그룹명 단독 토큰:
+            # 회사 문맥 증거(접미 결합 or 주어+쉼표) 없으면 차단.
+            # Claude 검증 위임은 이 이름들에겐 도박이다 — 검증 1회 실패가 곧
+            # 오등록이 된다 (2026-08-26 대상/기술수출, 2026-09-01 효성/전력기기
+            # 실사고 — "HD현대·효성 한발 앞서"처럼 헤드라인이 계열사명을
+            # 그룹명으로 줄여 쓰면 위의 _group_prefix_is_noise가 찾을 더 긴
+            # 계열사 토큰 자체가 텍스트에 없어 뚫린다).
+            if ((candidate in AMBIGUOUS_COMMON_NOUN_NAMES
+                    or candidate in GROUP_PREFIX_NAMES)
                     and ambiguous_name_lacks_company_context(candidate, combined_text)):
                 continue
             # 숫자/금액/조사/HTML잔재 차단 — 단, 상장사명 화이트리스트는 예외
