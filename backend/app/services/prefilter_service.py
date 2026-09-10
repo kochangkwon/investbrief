@@ -36,6 +36,13 @@ PREFILTER_MIN_MARKET_CAP = 50_000_000_000  # 500억 원
 # 수급 필터 (키움 REST) — 세력이 하락에 베팅 중인 종목 제외
 PREFILTER_SHORT_WEIGHT_MAX = 15.0    # 최근 5일 공매도 비중 평균(%) 상한
 PREFILTER_LENDING_SURGE_MAX = 1.5    # 대차잔고 급증 배수 상한 (최신/직전평균)
+# ── 대형주(시총 ≥ 10조) 전용 임계 (STOCKAI_LARGECAP_TRACK L1, 2026-09-10) ──
+# 대형주는 기관 헤지로 공매도·대차가 구조적으로 높아 단일 잣대가 평상시 수치를
+# 경고로 읽었다 (실측: 삼성바이오 F8 1.57, 현대차 F7 17.6%, LG이노텍 F8 1.51 —
+# 전부 아래 임계로는 통과). F1/F4/F5는 체격 무관 보편 리스크라 무변경.
+PREFILTER_LARGECAP_MIN_MCAP = 10_000_000_000_000
+PREFILTER_SHORT_WEIGHT_MAX_LARGECAP = 25.0
+PREFILTER_LENDING_SURGE_MAX_LARGECAP = 2.0
 
 PREFILTER_CONCURRENCY = 5
 
@@ -192,16 +199,24 @@ def _check_market_cap_filter(
 
 def _check_supply_demand_filter(
     signal: Optional[dict[str, Any]],
+    mcap: Optional[int] = None,
 ) -> tuple[Optional[bool], list[str], dict[str, Any]]:
     """F7~F8: 키움 수급(공매도/대차) 필터.
 
     - signal None(키 미설정/조회 실패) → (None, [], {}) → 보수적 통과
     - F7: 최근 5일 공매도 비중 ≥ 상한 AND 상승 추세 → 제외
     - F8: 대차잔고 급증(최신/직전평균 ≥ 상한) → 제외
+    - 시총 ≥ PREFILTER_LARGECAP_MIN_MCAP: 대형주 임계 적용(F7[L]/F8[L] 표기).
+      시총 미확인(None)은 대형주 아님으로 처리 — 완화 미적용(fail-conservative).
     기관·외국인 순매매 등 나머지 값은 메트릭으로만 첨부(하드 필터 아님).
     """
     if not signal:
         return None, [], {}
+
+    largecap = mcap is not None and mcap >= PREFILTER_LARGECAP_MIN_MCAP
+    sw_max = PREFILTER_SHORT_WEIGHT_MAX_LARGECAP if largecap else PREFILTER_SHORT_WEIGHT_MAX
+    surge_max = PREFILTER_LENDING_SURGE_MAX_LARGECAP if largecap else PREFILTER_LENDING_SURGE_MAX
+    tag = "[L]" if largecap else ""
 
     metrics: dict[str, Any] = dict(signal)
     fails: list[str] = []
@@ -209,17 +224,17 @@ def _check_supply_demand_filter(
     sw5 = signal.get("short_weight_5d")
     if (
         sw5 is not None
-        and sw5 >= PREFILTER_SHORT_WEIGHT_MAX
+        and sw5 >= sw_max
         and signal.get("short_weight_rising")
     ):
         fails.append(
-            f"F7: 공매도비중 {sw5:.1f}% ≥ {PREFILTER_SHORT_WEIGHT_MAX:.0f}% 상승추세"
+            f"F7{tag}: 공매도비중 {sw5:.1f}% ≥ {sw_max:.0f}% 상승추세"
         )
 
     surge = signal.get("lending_surge")
-    if surge is not None and surge >= PREFILTER_LENDING_SURGE_MAX:
+    if surge is not None and surge >= surge_max:
         fails.append(
-            f"F8: 대차잔고 급증 ×{surge:.2f} ≥ ×{PREFILTER_LENDING_SURGE_MAX}"
+            f"F8{tag}: 대차잔고 급증 ×{surge:.2f} ≥ ×{surge_max}"
         )
 
     if fails:
@@ -312,7 +327,7 @@ async def prefilter_stock(stock_code: str) -> PrefilterResult:
 
     price_pass, price_reasons, price_metrics = _check_price_filters(closes)
     mcap_pass, mcap_reasons, mcap_metrics = _check_market_cap_filter(mcap)
-    supply_pass, supply_reasons, supply_metrics = _check_supply_demand_filter(supply)
+    supply_pass, supply_reasons, supply_metrics = _check_supply_demand_filter(supply, mcap)
     risk_pass, risk_reasons, risk_metrics = _check_risk_flags_filter(risk_report)
 
     explicitly_failed = (
