@@ -175,7 +175,7 @@ MAX_CANDIDATES_PER_THEME = 30
 # 프롬프트는 verify_prompts.build_theme_verify_prompt(빌더)로 통합, 호출/파싱은
 # ai_verifier.verify_theme_with_claude로 위임 (VERDICT+MATERIALITY+REASON).
 
-PROMPT_VERSION = "v2"  # 지시서 F: 신선도+materiality 적용 버전 태그
+PROMPT_VERSION = "v3"  # v3(2026-09-16): 헤드라인 축약 주체판별 — 효성 오판 2회 재발 방지
 
 
 async def _verify_theme_match(
