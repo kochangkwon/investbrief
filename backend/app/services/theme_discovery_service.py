@@ -8,7 +8,7 @@ from datetime import timedelta
 from typing import Any, Optional
 
 import anthropic
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors.stock_search import search_stocks
@@ -30,6 +30,39 @@ SECTOR_KEYWORDS = [
 # 프롬프트 입력 배분: 거시(브리프) 400 + 섹터 200 (기존 상한 600 유지)
 _MACRO_TITLE_CAP = 400
 _SECTOR_TITLE_CAP = 200
+
+# ── 주간 자동 등록/정리 임계 ──────────────────────────────────────────
+# 테마 1개당 하루 평균 ~7.5회 AI 검증을 소비하므로 총량이 곧 크레딧 상한이다.
+MAX_NEW_THEMES_PER_WEEK = 3   # 1회 발굴에서 등록할 신규 테마 상한
+MAX_ACTIVE_THEMES = 15        # 활성 테마 총 상한 (하루 검증 ~113회)
+RETIRE_YIELD_THRESHOLD = 0.05  # 정리 임계 — AI 검증 수율 5% 미만
+RETIRE_MIN_VERDICTS = 20      # 수율 판정 최소 표본 (미만이면 판정 보류)
+RETIRE_WINDOW_DAYS = 30       # 수율·수혜주 관찰 윈도우
+
+# ── 상한 도달 시 저생산성 테마 교체(rotation) ────────────────────────
+# 활성 상한에 막힌 4원칙 통과 신규 테마는 "가장 생산성 낮은 기존 테마"와 자리를
+# 바꾼다. 생산성 = 30일 YES 감지 수 + 60일 수혜주(ThemeScanResult) 고유 종목 수.
+# 생산성이 ROTATION_VICTIM_MAX_SCORE를 넘는 테마는 교체 대상이 아니다 — 검증된
+# 테마를 미검증 신규와 바꾸는 역선택 방지. 교체 대상이 없으면 보류.
+ROTATION_GRACE_DAYS = 14        # 등록 후 이 기간은 교체 대상에서 제외
+ROTATION_VICTIM_MAX_SCORE = 1   # 생산성 ≤ 1 인 테마만 교체 가능
+ROTATION_YES_WINDOW_DAYS = 30
+ROTATION_SCAN_WINDOW_DAYS = 60
+MIN_KEYWORDS_PER_THEME = 2      # 4원칙 정리 후 남는 키워드 최소 수
+
+# ── 키워드 4원칙 기계 판정 규칙 (원칙 3 범용어) ─────────────────────
+# 발굴 프롬프트의 원칙 3 예시("차세대반도체", "공급망 재편", "소재혁신")를 포함하는
+# 형태 규칙. 의미 판정(원칙 1·2)은 _semantic_keyword_check(Claude)가 맡는다.
+GENERIC_KEYWORD_EXACT = {
+    "공급망", "공급망 재편", "소재", "장비", "기술", "산업", "혁신", "성장",
+    "수출", "수주", "정책", "투자", "신사업", "글로벌", "미래", "전환",
+    "트렌드", "패러다임", "모멘텀", "테마", "AI", "인공지능", "반도체",
+    "2차전지", "바이오", "로봇", "친환경", "에너지", "디지털", "플랫폼",
+}
+GENERIC_KEYWORD_PREFIXES = ("차세대", "신개념", "첨단", "미래형")
+GENERIC_KEYWORD_SUFFIXES = (
+    "혁신", "재편", "고도화", "패러다임", "트렌드", "확대", "강화", "전환기",
+)
 
 # radar와 동일 패턴 — 영문 시작 허용 (LG·SK·HD·POSCO 등 대형주가
 # 빈도 분석에서 구조적으로 제외되던 불일치 해소)
@@ -595,16 +628,420 @@ async def suggest_themes_from_analysis(analysis: str) -> str:
         return ""
 
 
+# ── 키워드 4원칙 검증 (자동 등록 게이트) ──────────────────────────────
+
+
+def _norm_kw(kw: str) -> str:
+    return re.sub(r"\s+", "", kw).lower()
+
+
+def is_generic_keyword(kw: str) -> bool:
+    """원칙 3 — 범용어 형태 규칙 (순수 함수)."""
+    k = kw.strip()
+    n = _norm_kw(k)
+    if len(n) < 2:
+        return True
+    if k in STOPWORDS or n in {_norm_kw(g) for g in GENERIC_KEYWORD_EXACT}:
+        return True
+    if any(k.startswith(p) for p in GENERIC_KEYWORD_PREFIXES):
+        return True
+    if any(k.endswith(s) for s in GENERIC_KEYWORD_SUFFIXES):
+        return True
+    return False
+
+
+def keyword_duplicates_existing(kw: str, existing_keywords: set[str]) -> Optional[str]:
+    """원칙 4 — 기존 키워드와 동일/포함 관계면 그 기존 키워드를 반환 (순수 함수).
+
+    포함 관계(HVDC ⊂ HVDC케이블)도 중복으로 본다: 스캐너의 부분 문자열 매칭은
+    두 키워드가 같은 기사를 잡으므로 "사실상 같은" 키워드다.
+    """
+    n = _norm_kw(kw)
+    if not n:
+        return None
+    for ex in existing_keywords:
+        e = _norm_kw(ex)
+        if not e:
+            continue
+        if n == e or (len(e) >= 2 and e in n) or (len(n) >= 2 and n in e):
+            return ex
+    return None
+
+
+class KeywordValidation:
+    """validate_theme_keywords 결과 — kept가 최소 수 이상이면 ok."""
+
+    def __init__(self) -> None:
+        self.kept: list[str] = []
+        self.dropped: list[tuple[str, str]] = []  # (키워드, 사유)
+
+    @property
+    def ok(self) -> bool:
+        return len(self.kept) >= MIN_KEYWORDS_PER_THEME
+
+    @property
+    def reason(self) -> str:
+        parts = [f"{kw}({why})" for kw, why in self.dropped]
+        head = "" if self.ok else f"유효 키워드 {len(self.kept)}개 < {MIN_KEYWORDS_PER_THEME}"
+        body = "제외: " + ", ".join(parts) if parts else ""
+        return " · ".join(p for p in (head, body) if p)
+
+
+def validate_theme_keywords(
+    keywords: list[str],
+    existing_keywords: set[str],
+    corp_names: set[str],
+) -> KeywordValidation:
+    """키워드 4원칙 기계 판정 (순수 함수) — 위반 키워드를 제거하고 나머지를 보존.
+
+    - 원칙 1 (기업명): stock_corp_map 상장사명 / 그룹명과 정확히 일치
+    - 원칙 3 (범용어): is_generic_keyword
+    - 원칙 4 (중복): keyword_duplicates_existing — 같은 테마 안의 중복도 제거
+    - 원칙 2 (수요·원인어)는 형태로 판정 불가 → Claude 의미 검증에 위임
+    """
+    v = KeywordValidation()
+    seen: set[str] = set()
+    corp_norm = {_norm_kw(c) for c in corp_names if c}
+    group_norm = {_norm_kw(g) for g in GROUP_PREFIX_NAMES}
+    for raw in keywords:
+        kw = raw.strip()
+        n = _norm_kw(kw)
+        if not n:
+            continue
+        if n in seen:
+            continue
+        seen.add(n)
+        if n in corp_norm or n in group_norm:
+            v.dropped.append((kw, "원칙1 기업명"))
+            continue
+        if is_generic_keyword(kw):
+            v.dropped.append((kw, "원칙3 범용어"))
+            continue
+        dup = keyword_duplicates_existing(kw, existing_keywords)
+        if dup is not None:
+            v.dropped.append((kw, f"원칙4 중복←{dup}"))
+            continue
+        v.kept.append(kw)
+    return v
+
+
+_KEYWORD_SEMANTIC_PROMPT = """당신은 한국 주식 테마 스캐너의 키워드 검수자입니다.
+
+테마명: {name}
+키워드: {keywords}
+
+이 키워드들은 뉴스 제목·본문 매칭에 **그대로** 사용됩니다. 아래 원칙을 **모든** 키워드가 지키는지 판정하세요.
+
+- 원칙 1 — 기업명·인명 금지: 특정 기업명(예: "한화시스템", "포스코인터"), 브랜드명, 인명(예: "최태원")은 불가. 테마 전체를 포착하는 개념어여야 함.
+- 원칙 2 — 수요·원인 단어 금지: 수요/원인을 가리키는 말(예: "데이터센터", "AI 전력난", "AI인프라")은 불가. 그 수요가 유발하는 공급·제품·기술 축(예: "변압기", "HVDC")이어야 함.
+- 원칙 3 — 범용어 금지: 너무 넓어 아무 종목에나 걸리는 말(예: "차세대반도체", "공급망 재편", "소재혁신")은 불가.
+
+하나라도 위반하면 NO. 애매하면 보수적으로 NO.
+
+출력 형식 (정확히):
+VERDICT: YES
+REASON: (1줄)
+
+또는:
+
+VERDICT: NO
+REASON: (위반 키워드와 원칙 번호, 1줄)
+"""
+
+
+def build_keyword_semantic_prompt(name: str, keywords: list[str]) -> str:
+    return _KEYWORD_SEMANTIC_PROMPT.format(name=name, keywords=", ".join(keywords))
+
+
+async def _semantic_keyword_check(name: str, keywords: list[str]) -> tuple[Optional[bool], str]:
+    """원칙 1·2(의미) Claude 판정. None = 판정 불가(API 실패) — 호출측 fail-closed."""
+    return await ai_verifier.verify_with_claude(
+        build_keyword_semantic_prompt(name, keywords),
+        log_context=f"[keyword-4rules] {name}",
+    )
+
+
+async def _load_corp_names() -> set[str]:
+    """stock_corp_map 상장사명 (원칙 1 기계 판정용). 실패 시 빈 집합."""
+    try:
+        from app.models.fundamental_cache import StockCorpMap
+        async with async_session() as session:
+            result = await session.execute(select(StockCorpMap.corp_name))
+            return {n for n in result.scalars().all() if n}
+    except Exception:
+        logger.exception("상장사명 로드 실패 — 원칙1 기계 판정 없이 진행")
+        return set()
+
+
+# ── 저생산성 테마 교체 (활성 상한 도달 시) ─────────────────────────────
+
+
+def select_rotation_victim(
+    stats: list[dict[str, Any]],
+    *,
+    grace_cutoff,
+    exclude: Optional[set[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """교체 대상 선택 (순수 함수).
+
+    stats: [{"name", "created_at", "yes_30d", "stocks_60d"}]
+    - 등록 ROTATION_GRACE_DAYS 미경과 / exclude 제외
+    - score = yes_30d + stocks_60d 가 ROTATION_VICTIM_MAX_SCORE 이하인 것 중 최소
+      (동점이면 오래된 테마 우선)
+    """
+    exclude = exclude or set()
+    eligible = []
+    for s in stats:
+        if s["name"] in exclude:
+            continue
+        created = s.get("created_at")
+        if created is None or created > grace_cutoff:
+            continue
+        score = int(s.get("yes_30d", 0)) + int(s.get("stocks_60d", 0))
+        if score > ROTATION_VICTIM_MAX_SCORE:
+            continue
+        eligible.append((score, created, s))
+    if not eligible:
+        return None
+    eligible.sort(key=lambda x: (x[0], x[1]))
+    victim = dict(eligible[0][2])
+    victim["score"] = eligible[0][0]
+    return victim
+
+
+async def _collect_active_theme_stats(session: AsyncSession) -> list[dict[str, Any]]:
+    """활성 테마별 생산성 지표 수집."""
+    from app.models.theme import Theme, ThemeDetection, ThemeScanResult
+
+    yes_cutoff = now_kst_naive() - timedelta(days=ROTATION_YES_WINDOW_DAYS)
+    scan_cutoff = today_kst() - timedelta(days=ROTATION_SCAN_WINDOW_DAYS)
+
+    result = await session.execute(select(Theme).where(Theme.enabled == True))  # noqa: E712
+    stats: list[dict[str, Any]] = []
+    for theme in result.scalars().all():
+        yes_count = await session.scalar(
+            select(func.count(ThemeDetection.id))
+            .where(ThemeDetection.theme_id == theme.id)
+            .where(ThemeDetection.detected_at >= yes_cutoff)
+            .where(ThemeDetection.is_active.is_(True))
+            .where(
+                (ThemeDetection.verdict.is_(None))
+                | (ThemeDetection.verdict != "NO")
+            )
+        ) or 0
+        stock_count = await session.scalar(
+            select(func.count(func.distinct(ThemeScanResult.stock_code)))
+            .where(ThemeScanResult.theme_name == theme.name)
+            .where(ThemeScanResult.scan_date >= scan_cutoff)
+            .where(ThemeScanResult.is_active.is_(True))
+        ) or 0
+        stats.append({
+            "name": theme.name,
+            "created_at": theme.created_at,
+            "yes_30d": int(yes_count),
+            "stocks_60d": int(stock_count),
+        })
+    return stats
+
+
+def format_auto_register_report(
+    *,
+    registered: list[dict[str, Any]],
+    replaced: list[tuple[dict[str, Any], str]],
+    deferred: list[str],
+    manual: list[tuple[dict[str, Any], str]],
+    skipped_dup: list[str],
+    active_count: int,
+) -> str:
+    """자동 등록 결과 텔레그램 블록 (순수 함수)."""
+    escape = telegram_service.escape_html
+    lines: list[str] = [""]
+
+    if registered:
+        lines.append(f"🆕 <b>신규 테마 {len(registered)}건 자동 등록</b> (키워드 4원칙 통과)")
+        for t in registered:
+            lines.append(f"· {escape(t['name'])} — {escape(', '.join(t['keywords']))}")
+            if t.get("dropped"):
+                dropped = ", ".join(f"{kw}({why})" for kw, why in t["dropped"])
+                lines.append(f"  <i>키워드 정리: {escape(dropped)}</i>")
+
+    if replaced:
+        lines.append("")
+        lines.append(f"🔁 <b>저생산성 테마 교체 {len(replaced)}건</b>")
+        for victim, new_name in replaced:
+            lines.append(
+                f"· {escape(victim['name'])} → {escape(new_name)} "
+                f"(30일 YES {victim['yes_30d']}건 · 60일 수혜주 {victim['stocks_60d']}개)"
+            )
+        lines.append('  <i>되돌리기: /theme-on "테마명"</i>')
+
+    if deferred:
+        lines.append("")
+        lines.append(
+            f"⏸️ 상한 초과 보류 {len(deferred)}건 "
+            f"(활성 {active_count}/{MAX_ACTIVE_THEMES}, 교체 가능 테마 없음): "
+            f"{escape(', '.join(deferred))}"
+        )
+
+    if manual:
+        lines.append("")
+        lines.append(f"✋ <b>수동 확인 {len(manual)}건</b> — 4원칙 미통과, 키워드 수정 후 등록하려면:")
+        for t, why in manual:
+            cmd = f'/theme-add "{t["name"]}" {",".join(t["keywords"])}'
+            lines.append(f"<code>{escape(cmd)}</code>")
+            lines.append(f"  <i>{escape(why)}</i>")
+
+    if skipped_dup:
+        lines.append("")
+        lines.append(f"ℹ️ 기존 테마 {len(skipped_dup)}건 스킵: {escape(', '.join(skipped_dup))}")
+        if any(n.endswith("(비활성)") for n in skipped_dup):
+            lines.append('  <i>비활성 테마가 재발굴됨 — 되살리려면 /theme-on "테마명"</i>')
+
+    lines.append("")
+    lines.append(f"📊 활성 테마 {active_count}/{MAX_ACTIVE_THEMES}")
+    return "\n".join(lines)
+
+
+async def auto_register_themes(analysis: str) -> tuple[list[str], str]:
+    """AI 발굴 결과를 Theme DB에 자동 등록 (주간 스케줄 전용).
+
+    수동 경로(/theme-discover)는 승인 게이트(suggest_themes_from_analysis)를
+    그대로 유지하고, 주간 자동 경로만 등록까지 수행한다.
+
+    등록 조건·상한:
+    1) 키워드 4원칙 통과분만 — 기계 판정(원칙 1·3·4)으로 위반 키워드를 제거한 뒤
+       남은 키워드에 Claude 의미 판정(원칙 1·2). 불통과·판정불가는 등록하지 않고
+       /theme-add 수동 명령으로 제안 (fail-closed).
+    2) 1회 최대 MAX_NEW_THEMES_PER_WEEK건
+    3) 활성 총 MAX_ACTIVE_THEMES건 — 초과 시 저생산성 테마와 교체
+       (select_rotation_victim). 교체 대상이 없으면 보류.
+
+    Returns: (등록된 테마명 리스트, 텔레그램 요약 메시지)
+    """
+    from app.models.theme import Theme  # 지연 import (순환 방지)
+    from app.services import theme_radar_service
+
+    try:
+        extracted = _extract_themes_from_analysis(analysis)
+        if not extracted:
+            return [], ""
+
+        async with async_session() as session:
+            # 이름은 unique 제약 — 비활성 테마도 중복 판정에 포함해야 한다
+            rows = list(
+                (await session.execute(select(Theme.name, Theme.keywords, Theme.enabled))).all()
+            )
+        existing_names = {name for name, _, _ in rows}
+        inactive_names = {name for name, _, enabled in rows if not enabled}
+        existing_keywords = {
+            kw.strip() for _, kws, _ in rows for kw in (kws or "").split(",") if kw.strip()
+        }
+
+        candidates = [t for t in extracted if t["name"] not in existing_names]
+        # 재발굴된 기존 테마: 비활성이면 되살릴 후보라고 표시 (자동 재활성화는 하지 않음)
+        skipped_dup = [
+            t["name"] + (" (비활성)" if t["name"] in inactive_names else "")
+            for t in extracted if t["name"] in existing_names
+        ]
+        rediscovered = {t["name"] for t in extracted if t["name"] in existing_names}
+        if not candidates:
+            if skipped_dup:
+                return [], f"\nℹ️ 발굴된 테마 {len(skipped_dup)}건 모두 기존 테마와 중복"
+            return [], ""
+
+        # 1) 키워드 4원칙 게이트
+        corp_names = await _load_corp_names()
+        passed: list[dict[str, Any]] = []
+        manual: list[tuple[dict[str, Any], str]] = []
+        for t in candidates:
+            v = validate_theme_keywords(t["keywords"], existing_keywords, corp_names)
+            if not v.ok:
+                manual.append((t, v.reason))
+                continue
+            sem_ok, sem_reason = await _semantic_keyword_check(t["name"], v.kept)
+            if sem_ok is None:
+                manual.append((t, f"AI 판정 불가({sem_reason}) — 안전상 미등록"))
+                continue
+            if sem_ok is False:
+                manual.append((t, f"AI 판정 NO: {sem_reason}"))
+                continue
+            passed.append({"name": t["name"], "keywords": v.kept, "dropped": v.dropped})
+            existing_keywords.update(v.kept)  # 같은 주 후보 간 중복도 차단
+
+        deferred: list[str] = [t["name"] for t in passed[MAX_NEW_THEMES_PER_WEEK:]]
+        passed = passed[:MAX_NEW_THEMES_PER_WEEK]
+
+        # 2) 등록 + 상한 교체
+        registered: list[dict[str, Any]] = []
+        replaced: list[tuple[dict[str, Any], str]] = []
+        async with async_session() as session:
+            stats = await _collect_active_theme_stats(session)
+            active_count = len(stats)
+            grace_cutoff = now_kst_naive() - timedelta(days=ROTATION_GRACE_DAYS)
+            # 이번 주 다시 발굴된 테마는 "여전히 유효"한 신호 — 교체 대상에서 제외
+            evicted: set[str] = set(rediscovered)
+
+            for t in passed:
+                victim_obj = None
+                if active_count >= MAX_ACTIVE_THEMES:
+                    victim = select_rotation_victim(
+                        stats, grace_cutoff=grace_cutoff, exclude=evicted
+                    )
+                    if victim is None:
+                        deferred.append(t["name"])
+                        continue
+                    victim_obj = (
+                        await session.execute(select(Theme).where(Theme.name == victim["name"]))
+                    ).scalar_one_or_none()
+                    if victim_obj is None:
+                        deferred.append(t["name"])
+                        continue
+                    victim_obj.enabled = False  # add_theme의 commit에 함께 실림
+                    evicted.add(victim["name"])
+                    active_count -= 1
+
+                ok, msg = await theme_radar_service.add_theme(
+                    session, t["name"], ",".join(t["keywords"])
+                )
+                if ok:
+                    registered.append(t)
+                    active_count += 1
+                    if victim_obj is not None:
+                        replaced.append((victim, t["name"]))
+                        logger.info("저생산성 테마 교체: %s → %s", victim["name"], t["name"])
+                    logger.info("신규 테마 자동 등록: %s", t["name"])
+                else:
+                    if victim_obj is not None:
+                        victim_obj.enabled = True
+                        evicted.discard(victim["name"])
+                        active_count += 1
+                    logger.warning("신규 테마 등록 스킵: %s", msg)
+                    manual.append((t, msg))
+
+        summary = format_auto_register_report(
+            registered=registered,
+            replaced=replaced,
+            deferred=deferred,
+            manual=manual,
+            skipped_dup=skipped_dup,
+            active_count=active_count,
+        )
+        return [t["name"] for t in registered], summary
+    except Exception:
+        logger.exception("테마 자동 등록 실패 (발굴 메시지는 정상)")
+        return [], ""
+
+
 # ── 텔레그램 리포트 ─────────────────────────────────────────────────
 
 
 async def send_weekly_theme_report() -> None:
     """주간 테마 발굴 리포트 (스케줄러에서 호출)
 
-    v3 권고 2+3 + 승인 게이트:
-    - 발굴 결과는 자동 등록하지 않고 /theme-add 명령어로 제안 (승인 게이트)
+    - 발굴 결과 중 키워드 4원칙 통과분만 자동 등록 (auto_register_themes —
+      상한 초과 시 저생산성 테마 교체, 불통과분은 /theme-add 수동 제안)
     - 빈도 분석 + 시장 주목 검증 (TOP 5)
-    - 결과 메시지에 등록 명령어 제안 + ✅/⚠️ 마크 추가
+    - 결과 메시지에 등록/교체/보류/수동확인 요약 + ✅/⚠️ 마크 추가
     """
     logger.info("주간 테마 발굴 리포트 시작")
 
@@ -616,8 +1053,8 @@ async def send_weekly_theme_report() -> None:
         )
         return
 
-    # 승인 게이트: 자동 등록 대신 명령어 제안
-    suggest_summary = await suggest_themes_from_analysis(result["analysis"])
+    # 주간 경로는 4원칙 통과분 자동 등록 (상한 내·교체). 수동 /theme-discover는 승인 게이트 유지.
+    _registered, suggest_summary = await auto_register_themes(result["analysis"])
 
     # 권고 2+3: 빈도 분석 + 시장 주목 검증
     top_stocks, name_titles = await _analyze_stock_frequency_with_titles(days=30)
@@ -642,7 +1079,7 @@ async def send_weekly_theme_report() -> None:
         escape(result["analysis"]),
     ]
 
-    # 승인 게이트: 등록 명령어 제안
+    # 자동 등록 요약 (등록/교체/보류/수동확인)
     if suggest_summary:
         parts.append(suggest_summary)
 
@@ -728,3 +1165,76 @@ async def deactivate_stale_themes(inactive_days: int = 42) -> list[str]:
             await session.commit()
 
     return deactivated
+
+
+async def retire_low_yield_themes(
+    grace_days: int = 42,
+    window_days: int = RETIRE_WINDOW_DAYS,
+) -> list[str]:
+    """저수율 테마 자동 비활성화 (삭제 아님 — 감지 이력 보존).
+
+    기준 (4개 모두 충족):
+    - enabled=True
+    - 생성 후 grace_days일 이상 경과 (계절성·신규 테마 보호)
+    - 최근 window_days일 AI 검증 수율 < RETIRE_YIELD_THRESHOLD
+    - 최근 window_days일 수혜주 산출(ThemeScanResult) 0건
+
+    수율 표본이 RETIRE_MIN_VERDICTS건 미만이면 판정을 보류한다. 감지가 적은
+    테마를 우연한 0건으로 죽이는 것을 막기 위함.
+
+    Returns: 비활성화된 테마명 리스트.
+    """
+    from app.models.theme import Theme, ThemeDetection, ThemeScanResult
+
+    cutoff = now_kst_naive() - timedelta(days=window_days)
+    grace_cutoff = now_kst_naive() - timedelta(days=grace_days)
+    scan_cutoff = today_kst() - timedelta(days=window_days)
+    retired: list[str] = []
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Theme).where(Theme.enabled == True)  # noqa: E712
+        )
+        themes = list(result.scalars().all())
+
+        for theme in themes:
+            if theme.created_at is None or theme.created_at > grace_cutoff:
+                continue
+
+            # 최근 window_days일 AI 검증 수율
+            verdict_result = await session.execute(
+                select(ThemeDetection.verdict)
+                .where(ThemeDetection.theme_id == theme.id)
+                .where(ThemeDetection.detected_at >= cutoff)
+                .where(ThemeDetection.is_active.is_(True))
+                .where(ThemeDetection.verdict.isnot(None))
+            )
+            verdicts = list(verdict_result.scalars().all())
+            if len(verdicts) < RETIRE_MIN_VERDICTS:
+                continue  # 표본 부족 — 판정 보류
+
+            yield_rate = sum(1 for v in verdicts if v == "YES") / len(verdicts)
+            if yield_rate >= RETIRE_YIELD_THRESHOLD:
+                continue
+
+            # 최근 window_days일 수혜주 산출
+            scan_result = await session.execute(
+                select(func.count(ThemeScanResult.id))
+                .where(ThemeScanResult.theme_name == theme.name)
+                .where(ThemeScanResult.scan_date >= scan_cutoff)
+                .where(ThemeScanResult.is_active.is_(True))
+            )
+            if (scan_result.scalar() or 0) > 0:
+                continue
+
+            theme.enabled = False
+            retired.append(theme.name)
+            logger.info(
+                "저수율 테마 비활성화: %s (수율 %.1f%%, 표본 %d건, 수혜주 0건)",
+                theme.name, yield_rate * 100, len(verdicts),
+            )
+
+        if retired:
+            await session.commit()
+
+    return retired

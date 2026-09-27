@@ -296,25 +296,39 @@ async def _daily_theme_scan():
 
 
 async def _weekly_theme_discovery():
-    """주 1회 아카이브 기반 테마 발굴 + 휴면 테마 정리 (매주 월요일 07:45)"""
+    """주 1회 테마 정리 + 아카이브 기반 발굴·자동 등록 (매주 월요일 07:45)
+
+    정리를 먼저 돌려야 활성 테마 총 상한(MAX_ACTIVE_THEMES)이 그 주의 신규
+    등록 여유로 정확히 반영된다.
+    """
+    cleaned: list[str] = []
+
+    # 1) 휴면 테마 비활성화 (42일 무감지 + 생성 42일 경과 — 계절성 테마 보호)
+    try:
+        cleaned += await theme_discovery_service.deactivate_stale_themes()
+    except Exception:
+        logger.exception("휴면 테마 정리 실패")
+
+    # 2) 저수율 테마 비활성화 (수율 5% 미만 AND 30일 수혜주 0건)
+    try:
+        cleaned += await theme_discovery_service.retire_low_yield_themes()
+    except Exception:
+        logger.exception("저수율 테마 정리 실패")
+
+    if cleaned:
+        await telegram_service.send_text(
+            f"🧹 테마 {len(cleaned)}건 비활성화: "
+            f"{', '.join(cleaned)} (되돌리기: /theme-on \"테마명\")"
+        )
+        logger.info("테마 %d건 비활성화: %s", len(cleaned), cleaned)
+
+    # 3) 발굴 + 신규 테마 자동 등록 (리포트 내부에서 상한 적용)
     logger.info("주간 테마 발굴 시작")
     try:
         await theme_discovery_service.send_weekly_theme_report()
         logger.info("주간 테마 발굴 완료")
     except Exception:
         logger.exception("주간 테마 발굴 실패")
-
-    # 휴면 테마 자동 비활성화 (42일 무감지 + 생성 42일 경과 — 계절성 테마 보호)
-    try:
-        deactivated = await theme_discovery_service.deactivate_stale_themes()
-        if deactivated:
-            await telegram_service.send_text(
-                f"🧹 휴면 테마 {len(deactivated)}건 비활성화: "
-                f"{', '.join(deactivated)} (재활성화: /theme-add 재등록)"
-            )
-            logger.info("휴면 테마 %d건 비활성화: %s", len(deactivated), deactivated)
-    except Exception:
-        logger.exception("휴면 테마 정리 실패")
 
 
 from pathlib import Path

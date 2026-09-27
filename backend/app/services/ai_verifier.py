@@ -59,7 +59,10 @@ async def verify_with_claude(
 
     호출 측에서 fail-closed(False)/pass-through(None) 정책을 선택해 변환한다.
     """
-    raw, err = await _call_raw(prompt, max_tokens=max_tokens, timeout=timeout, log_context=log_context)
+    raw, err = await _call_raw(
+        prompt, model=settings.ai_model,
+        max_tokens=max_tokens, timeout=timeout, log_context=log_context,
+    )
     if err is not None:
         return None, err
 
@@ -74,22 +77,34 @@ async def verify_with_claude(
     return verdict, reason
 
 
+def _extract_text(response) -> str:
+    """응답에서 text 블록만 이어붙인다.
+
+    thinking이 켜진 모델은 content[0]이 ThinkingBlock이라 [0].text가 없다
+    (Sonnet 5는 adaptive thinking이 기본값). 블록 타입으로 골라야 안전.
+    """
+    return "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+
+
 async def _call_raw(
-    prompt: str, *, max_tokens: int, timeout: float, log_context: str,
+    prompt: str, *, model: str, max_tokens: int, timeout: float, log_context: str,
+    thinking: Optional[dict] = None,
 ) -> tuple[str, Optional[str]]:
     """Claude 호출 → (raw_text, error). error가 None이면 성공."""
     if not settings.anthropic_api_key:
         return "", "no api key"
     last_err = "unknown"
+    extra = {"thinking": thinking} if thinking else {}
     for attempt in range(RETRY_ATTEMPTS):
         try:
             client = _get_client().with_options(timeout=timeout)
             response = await client.messages.create(
-                model=settings.ai_model,
+                model=model,
                 max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
+                **extra,
             )
-            return (response.content[0].text if response.content else ""), None
+            return _extract_text(response), None
         except anthropic.RateLimitError:
             last_err = "rate limit"
             logger.warning(
@@ -122,7 +137,13 @@ async def verify_theme_with_claude(
         - materiality: "HIGH"|"MEDIUM"|"LOW"|None(미파싱 — 호출측 보수 처리)
         - reason: 근거 또는 실패 사유
     """
-    raw, err = await _call_raw(prompt, max_tokens=max_tokens, timeout=timeout, log_context=log_context)
+    # thinking 비활성 — YES/NO 판정에 추론 블록이 불필요하고, 켜두면
+    # max_tokens(200)를 thinking이 잠식해 응답이 잘리고 파싱 실패(=감지 소실)한다.
+    raw, err = await _call_raw(
+        prompt, model=settings.ai_verify_model,
+        max_tokens=max_tokens, timeout=timeout, log_context=log_context,
+        thinking={"type": "disabled"},
+    )
     if err is not None:
         return None, None, err
 

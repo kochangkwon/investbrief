@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     brief_send_hour: int = 7
     brief_send_minute: int = 30
     ai_model: str = "claude-opus-4-8"
+    # 테마 검증 전용 모델 — 후보 1건당 1회 호출(하루 60~125회)이라 비용 비중이 가장 크다.
+    # YES/NO + materiality 판정만 하므로 요약용(ai_model)보다 낮은 티어로 분리.
+    ai_verify_model: str = "claude-sonnet-5"
     ai_max_tokens: int = 1000
 
     # US Market (모닝브리프와 분리 발송)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -31,7 +31,9 @@ HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 
 <b>🎯 테마 선행 스캐너</b>
 /theme-add "테마명" 키워드1,키워드2 — 테마 추가
-/theme-remove "테마명" — 테마 삭제
+/theme-remove "테마명" — 테마 삭제 (이력 포함)
+/theme-off "테마명" — 테마 비활성화 (이력 보존)
+/theme-on "테마명" — 테마 재활성화
 /theme-list — 테마 목록
 /theme-scan — 즉시 스캔 (수동)
 
@@ -41,8 +43,9 @@ HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 /theme-discover [일수] — AI가 부상 테마 발굴 (기본 30일)
 /theme-trending — 언급 빈도 TOP 10 종목
 
-매주 월요일 07:45 자동 발굴 리포트 전송
-(발굴 테마는 후보 제안 → /theme-add 복사 전송으로 승인 등록)
+매주 월요일 07:45 자동 정리 + 발굴 리포트 전송
+(휴면·저수율 테마 비활성화 → 키워드 4원칙 통과 테마만 자동 등록,
+ 활성 상한 15개 초과 시 저생산성 테마와 교체 · 미통과분은 /theme-add 수동 제안)
 
 /help — 도움말"""
 
@@ -220,6 +223,37 @@ async def _handle_theme_remove(args: str) -> str:
     return ("✅ " if success else "❌ ") + message
 
 
+def _parse_quoted_theme_name(args: str, usage: str) -> tuple[Optional[str], str]:
+    """`"테마명"` 인자 파싱 — (테마명, 오류메시지). 실패 시 테마명 None."""
+    if not args.strip():
+        return None, f"사용법: {usage}"
+    match = re.match(r'^"([^"]+)"$', args.strip())
+    if not match:
+        return None, f"테마명은 큰따옴표로 감싸주세요: {usage}"
+    return match.group(1).strip(), ""
+
+
+async def _handle_theme_toggle(args: str, enabled: bool) -> str:
+    """/theme-on·/theme-off "테마명" — 활성/비활성 토글 (이력 보존).
+
+    주간 정리(휴면·저수율·교체)로 꺼진 테마를 되살리는 경로. 이름이 unique라
+    /theme-add 재등록은 "이미 존재" 오류가 난다.
+    """
+    cmd = "/theme-on" if enabled else "/theme-off"
+    name, err = _parse_quoted_theme_name(args, f'{cmd} "테마명"')
+    if name is None:
+        return err
+    async with async_session() as session:
+        success, message = await theme_radar_service.set_theme_enabled(session, name, enabled)
+        note = ""
+        if success and enabled:
+            active = await theme_radar_service.count_active_themes(session)
+            cap = theme_discovery_service.MAX_ACTIVE_THEMES
+            if active > cap:
+                note = f"\n⚠️ 활성 테마 {active}/{cap} — 상한 초과 (다음 주간 정리에서 교체 대상 확대)"
+    return ("✅ " if success else "❌ ") + message + note
+
+
 async def _handle_theme_list() -> str:
     """/theme-list — 등록된 테마 목록"""
     async with async_session() as session:
@@ -228,7 +262,11 @@ async def _handle_theme_list() -> str:
     if not themes:
         return "등록된 테마가 없습니다.\n/theme-add 로 테마를 추가해보세요."
 
-    lines = [f"🎯 <b>등록된 테마 ({len(themes)}개)</b>", ""]
+    active = sum(1 for t in themes if t["enabled"])
+    lines = [
+        f"🎯 <b>등록된 테마 ({len(themes)}개 · 활성 {active}/{theme_discovery_service.MAX_ACTIVE_THEMES})</b>",
+        "",
+    ]
     for i, t in enumerate(themes, 1):
         status = "🟢" if t["enabled"] else "🔴"
         lines.append(
@@ -336,6 +374,8 @@ COMMAND_HANDLERS = {
     "/report": _handle_report,
     "/theme-add": _handle_theme_add,
     "/theme-remove": _handle_theme_remove,
+    "/theme-off": lambda args: _handle_theme_toggle(args, False),
+    "/theme-on": lambda args: _handle_theme_toggle(args, True),
     "/theme-list": lambda args: _handle_theme_list(),
     "/theme-scan": lambda args: _handle_theme_scan(),
     "/theme-discover": _handle_theme_discover,

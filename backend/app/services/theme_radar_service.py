@@ -1085,6 +1085,31 @@ async def remove_theme(session: AsyncSession, name: str) -> tuple[bool, str]:
     return True, f"테마 삭제 완료: {name}"
 
 
+async def set_theme_enabled(
+    session: AsyncSession, name: str, enabled: bool
+) -> tuple[bool, str]:
+    """테마 활성/비활성 토글 (/theme-on, /theme-off) — 감지 이력은 보존.
+
+    이름은 unique 제약이라 비활성 테마를 /theme-add로 재등록할 수 없다.
+    주간 정리(휴면·저수율·교체)로 꺼진 테마를 되살리는 유일한 경로.
+    """
+    result = await session.execute(select(Theme).where(Theme.name == name))
+    theme = result.scalar_one_or_none()
+    if not theme:
+        return False, f"테마를 찾을 수 없습니다: {name}"
+    state = "활성" if enabled else "비활성"
+    if bool(theme.enabled) == enabled:
+        return False, f"이미 {state} 상태입니다: {name}"
+    theme.enabled = enabled
+    await session.commit()
+    return True, f"테마 {state}화 완료: {name}"
+
+
+async def count_active_themes(session: AsyncSession) -> int:
+    result = await session.execute(select(Theme).where(Theme.enabled.is_(True)))
+    return len(list(result.scalars().all()))
+
+
 async def list_themes(session: AsyncSession) -> list[dict[str, Any]]:
     """테마 목록 + 각 테마별 감지 종목 수"""
     result = await session.execute(
