@@ -50,6 +50,15 @@ ROTATION_YES_WINDOW_DAYS = 30
 ROTATION_SCAN_WINDOW_DAYS = 60
 MIN_KEYWORDS_PER_THEME = 2      # 4원칙 정리 후 남는 키워드 최소 수
 
+# ── 임시 초과석(probation) ───────────────────────────────────────────
+# 상한 도달 + 교체 대상 없음 + 신규 테마 모멘텀 🔥🔥🔥 이면 기존 테마를 즉시
+# 죽이지 않고 상한을 넘겨 등록한다. 전 활성 테마가 PROBATION_DAYS 이상 된 시점에
+# 생산성 꼴찌(임계 없음)를 초과분만큼 비활성화해 상한으로 복귀 — 신규에게 증명
+# 기회를 주되 결정은 AI 🔥 판정이 아니라 실측 생산성으로 한다.
+PROBATION_SLOTS = 1             # 상한 초과 허용 자리 수
+PROBATION_DAYS = 14             # 초과 해소 전 최소 관찰 기간 (= ROTATION_GRACE_DAYS)
+PROBATION_MIN_MOMENTUM = 3      # 🔥 개수 — 3(강함)만 초과석 자격
+
 # ── 키워드 4원칙 기계 판정 규칙 (원칙 3 범용어) ─────────────────────
 # 발굴 프롬프트의 원칙 3 예시("차세대반도체", "공급망 재편", "소재혁신")를 포함하는
 # 형태 규칙. 의미 판정(원칙 1·2)은 _semantic_keyword_check(Claude)가 맡는다.
@@ -539,6 +548,7 @@ def _extract_themes_from_analysis(analysis: str) -> list[dict[str, Any]]:
     keyword_pattern = re.compile(
         r"\*\*핵심\s*키워드\*\*\s*:\s*(.+?)(?=\n|$)",
     )
+    momentum_pattern = re.compile(r"\*\*모멘텀\s*강도\*\*\s*:\s*(.+?)(?=\n|$)")
 
     theme_matches = list(theme_pattern.finditer(analysis))
 
@@ -565,9 +575,13 @@ def _extract_themes_from_analysis(analysis: str) -> list[dict[str, Any]]:
             logger.warning("테마 '%s' 키워드 비어있음 — 스킵", theme_name)
             continue
 
+        momentum_match = momentum_pattern.search(section)
+        momentum = momentum_match.group(1).count("🔥") if momentum_match else 0
+
         themes.append({
             "name": theme_name,
             "keywords": keywords,
+            "momentum": momentum,   # 🔥 개수 (0=미기재)
         })
 
     logger.info("AI 응답에서 %d개 테마 추출", len(themes))
@@ -781,13 +795,14 @@ def select_rotation_victim(
     *,
     grace_cutoff,
     exclude: Optional[set[str]] = None,
+    max_score: Optional[int] = ROTATION_VICTIM_MAX_SCORE,
 ) -> Optional[dict[str, Any]]:
     """교체 대상 선택 (순수 함수).
 
     stats: [{"name", "created_at", "yes_30d", "stocks_60d"}]
     - 등록 ROTATION_GRACE_DAYS 미경과 / exclude 제외
-    - score = yes_30d + stocks_60d 가 ROTATION_VICTIM_MAX_SCORE 이하인 것 중 최소
-      (동점이면 오래된 테마 우선)
+    - score = yes_30d + stocks_60d 가 max_score 이하인 것 중 최소
+      (동점이면 오래된 테마 우선). max_score=None 이면 임계 없이 꼴찌.
     """
     exclude = exclude or set()
     eligible = []
@@ -798,7 +813,7 @@ def select_rotation_victim(
         if created is None or created > grace_cutoff:
             continue
         score = int(s.get("yes_30d", 0)) + int(s.get("stocks_60d", 0))
-        if score > ROTATION_VICTIM_MAX_SCORE:
+        if max_score is not None and score > max_score:
             continue
         eligible.append((score, created, s))
     if not eligible:
@@ -844,6 +859,71 @@ async def _collect_active_theme_stats(session: AsyncSession) -> list[dict[str, A
     return stats
 
 
+def select_overflow_evictions(
+    stats: list[dict[str, Any]],
+    *,
+    now,
+    max_active: int = MAX_ACTIVE_THEMES,
+    probation_days: int = PROBATION_DAYS,
+) -> Optional[list[dict[str, Any]]]:
+    """임시 초과 해소 대상 (순수 함수).
+
+    활성 수가 max_active를 넘을 때, **모든** 활성 테마가 probation_days 이상
+    됐으면 생산성 꼴찌를 초과분만큼 반환. 아직 관찰 중인 테마가 있으면 None
+    (이번 주 보류). 초과가 없으면 빈 리스트.
+    """
+    excess = len(stats) - max_active
+    if excess <= 0:
+        return []
+    cutoff = now - timedelta(days=probation_days)
+    if any(s.get("created_at") is None or s["created_at"] > cutoff for s in stats):
+        return None
+    ranked = sorted(
+        stats,
+        key=lambda s: (int(s.get("yes_30d", 0)) + int(s.get("stocks_60d", 0)), s["created_at"]),
+    )
+    out = []
+    for s in ranked[:excess]:
+        v = dict(s)
+        v["score"] = int(s.get("yes_30d", 0)) + int(s.get("stocks_60d", 0))
+        out.append(v)
+    return out
+
+
+async def resolve_overflow_themes() -> list[str]:
+    """임시 초과석 해소 — 상한 복귀 (주간 정리 단계에서 호출).
+
+    Returns: 비활성화된 테마명 리스트 (관찰 중이면 빈 리스트).
+    """
+    from app.models.theme import Theme
+
+    retired: list[str] = []
+    async with async_session() as session:
+        stats = await _collect_active_theme_stats(session)
+        victims = select_overflow_evictions(stats, now=now_kst_naive())
+        if victims is None:
+            logger.info(
+                "임시 초과 %d건 — 관찰 기간(%d일) 미경과 테마 있어 이번 주 보류",
+                len(stats) - MAX_ACTIVE_THEMES, PROBATION_DAYS,
+            )
+            return []
+        for v in victims:
+            theme = (
+                await session.execute(select(Theme).where(Theme.name == v["name"]))
+            ).scalar_one_or_none()
+            if theme is None:
+                continue
+            theme.enabled = False
+            retired.append(theme.name)
+            logger.info(
+                "임시 초과 해소: %s 비활성화 (30일 YES %d · 60일 수혜주 %d)",
+                theme.name, v["yes_30d"], v["stocks_60d"],
+            )
+        if retired:
+            await session.commit()
+    return retired
+
+
 def format_auto_register_report(
     *,
     registered: list[dict[str, Any]],
@@ -852,10 +932,12 @@ def format_auto_register_report(
     manual: list[tuple[dict[str, Any], str]],
     skipped_dup: list[str],
     active_count: int,
+    probation: Optional[list[str]] = None,
 ) -> str:
     """자동 등록 결과 텔레그램 블록 (순수 함수)."""
     escape = telegram_service.escape_html
     lines: list[str] = [""]
+    probation = probation or []
 
     if registered:
         lines.append(f"🆕 <b>신규 테마 {len(registered)}건 자동 등록</b> (키워드 4원칙 통과)")
@@ -874,6 +956,16 @@ def format_auto_register_report(
                 f"(30일 YES {victim['yes_30d']}건 · 60일 수혜주 {victim['stocks_60d']}개)"
             )
         lines.append('  <i>되돌리기: /theme-on "테마명"</i>')
+
+    if probation:
+        lines.append("")
+        lines.append(
+            f"🧪 <b>임시 초과 등록 {len(probation)}건</b> (🔥🔥🔥 · 활성 {active_count}/{MAX_ACTIVE_THEMES}): "
+            f"{escape(', '.join(probation))}"
+        )
+        lines.append(
+            f"  <i>{PROBATION_DAYS}일 관찰 후 생산성 꼴찌 {len(probation)}개 자동 비활성화로 상한 복귀</i>"
+        )
 
     if deferred:
         lines.append("")
@@ -914,7 +1006,9 @@ async def auto_register_themes(analysis: str) -> tuple[list[str], str]:
        /theme-add 수동 명령으로 제안 (fail-closed).
     2) 1회 최대 MAX_NEW_THEMES_PER_WEEK건
     3) 활성 총 MAX_ACTIVE_THEMES건 — 초과 시 저생산성 테마와 교체
-       (select_rotation_victim). 교체 대상이 없으면 보류.
+       (select_rotation_victim). 교체 대상이 없으면: 모멘텀 🔥🔥🔥 신규는
+       임시 초과석(PROBATION_SLOTS)으로 등록하고 나머지는 보류.
+       초과분은 주간 정리 단계 resolve_overflow_themes가 실측 생산성으로 해소.
 
     Returns: (등록된 테마명 리스트, 텔레그램 요약 메시지)
     """
@@ -965,7 +1059,10 @@ async def auto_register_themes(analysis: str) -> tuple[list[str], str]:
             if sem_ok is False:
                 manual.append((t, f"AI 판정 NO: {sem_reason}"))
                 continue
-            passed.append({"name": t["name"], "keywords": v.kept, "dropped": v.dropped})
+            passed.append({
+                "name": t["name"], "keywords": v.kept, "dropped": v.dropped,
+                "momentum": t.get("momentum", 0),
+            })
             existing_keywords.update(v.kept)  # 같은 주 후보 간 중복도 차단
 
         deferred: list[str] = [t["name"] for t in passed[MAX_NEW_THEMES_PER_WEEK:]]
@@ -974,6 +1071,7 @@ async def auto_register_themes(analysis: str) -> tuple[list[str], str]:
         # 2) 등록 + 상한 교체
         registered: list[dict[str, Any]] = []
         replaced: list[tuple[dict[str, Any], str]] = []
+        probation: list[str] = []
         async with async_session() as session:
             stats = await _collect_active_theme_stats(session)
             active_count = len(stats)
@@ -983,22 +1081,33 @@ async def auto_register_themes(analysis: str) -> tuple[list[str], str]:
 
             for t in passed:
                 victim_obj = None
+                on_probation = False
                 if active_count >= MAX_ACTIVE_THEMES:
                     victim = select_rotation_victim(
                         stats, grace_cutoff=grace_cutoff, exclude=evicted
                     )
                     if victim is None:
-                        deferred.append(t["name"])
-                        continue
-                    victim_obj = (
-                        await session.execute(select(Theme).where(Theme.name == victim["name"]))
-                    ).scalar_one_or_none()
-                    if victim_obj is None:
-                        deferred.append(t["name"])
-                        continue
-                    victim_obj.enabled = False  # add_theme의 commit에 함께 실림
-                    evicted.add(victim["name"])
-                    active_count -= 1
+                        # 교체 대상 없음 → 🔥🔥🔥 이면 임시 초과석, 아니면 보류
+                        if (
+                            t.get("momentum", 0) >= PROBATION_MIN_MOMENTUM
+                            and active_count < MAX_ACTIVE_THEMES + PROBATION_SLOTS
+                        ):
+                            on_probation = True
+                        else:
+                            deferred.append(t["name"])
+                            continue
+                    if not on_probation:
+                        victim_obj = (
+                            await session.execute(
+                                select(Theme).where(Theme.name == victim["name"])
+                            )
+                        ).scalar_one_or_none()
+                        if victim_obj is None:
+                            deferred.append(t["name"])
+                            continue
+                        victim_obj.enabled = False  # add_theme의 commit에 함께 실림
+                        evicted.add(victim["name"])
+                        active_count -= 1
 
                 ok, msg = await theme_radar_service.add_theme(
                     session, t["name"], ",".join(t["keywords"])
@@ -1009,6 +1118,9 @@ async def auto_register_themes(analysis: str) -> tuple[list[str], str]:
                     if victim_obj is not None:
                         replaced.append((victim, t["name"]))
                         logger.info("저생산성 테마 교체: %s → %s", victim["name"], t["name"])
+                    if on_probation:
+                        probation.append(t["name"])
+                        logger.info("임시 초과 등록(🔥🔥🔥): %s (활성 %d)", t["name"], active_count)
                     logger.info("신규 테마 자동 등록: %s", t["name"])
                 else:
                     if victim_obj is not None:
@@ -1025,6 +1137,7 @@ async def auto_register_themes(analysis: str) -> tuple[list[str], str]:
             manual=manual,
             skipped_dup=skipped_dup,
             active_count=active_count,
+            probation=probation,
         )
         return [t["name"] for t in registered], summary
     except Exception:

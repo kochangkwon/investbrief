@@ -9,11 +9,14 @@ from app.services import theme_discovery_service as tds
 from app.services.theme_discovery_service import (
     MAX_ACTIVE_THEMES,
     MIN_KEYWORDS_PER_THEME,
+    PROBATION_DAYS,
     ROTATION_VICTIM_MAX_SCORE,
+    _extract_themes_from_analysis,
     build_keyword_semantic_prompt,
     format_auto_register_report,
     is_generic_keyword,
     keyword_duplicates_existing,
+    select_overflow_evictions,
     select_rotation_victim,
     validate_theme_keywords,
 )
@@ -140,6 +143,67 @@ def test_select_rotation_victim_never_evicts_productive_theme():
     grace = now - timedelta(days=tds.ROTATION_GRACE_DAYS)
     stats = [{"name": "P", "created_at": now - timedelta(days=90), "yes_30d": 2, "stocks_60d": 0}]
     assert select_rotation_victim(stats, grace_cutoff=grace) is None
+
+
+def test_select_rotation_victim_without_threshold_picks_last_place():
+    now = datetime(2026, 9, 28, 7, 45)
+    grace = now - timedelta(days=tds.ROTATION_GRACE_DAYS)
+    stats = [
+        {"name": "P5", "created_at": now - timedelta(days=90), "yes_30d": 5, "stocks_60d": 0},
+        {"name": "P3", "created_at": now - timedelta(days=90), "yes_30d": 3, "stocks_60d": 0},
+    ]
+    assert select_rotation_victim(stats, grace_cutoff=grace) is None
+    assert select_rotation_victim(stats, grace_cutoff=grace, max_score=None)["name"] == "P3"
+
+
+# ── 임시 초과석: 모멘텀 파싱 + 해소 ──────────────────────────────────
+
+
+def test_extract_themes_parses_momentum():
+    analysis = """### 1. 전력기기
+- **핵심 키워드**: HVDC, 변압기
+- **모멘텀 강도**: 🔥🔥🔥 (강함)
+### 2. 조선
+- **핵심 키워드**: VLCC, FLNG
+- **모멘텀 강도**: 🔥 (약함)
+### 3. 원전
+- **핵심 키워드**: SMR, 원전 EPC
+"""
+    themes = {t["name"]: t["momentum"] for t in _extract_themes_from_analysis(analysis)}
+    assert themes == {"전력기기": 3, "조선": 1, "원전": 0}
+
+
+def test_select_overflow_evictions():
+    now = datetime(2026, 9, 28, 7, 45)
+    old = now - timedelta(days=60)
+    base = [
+        {"name": f"T{i}", "created_at": old, "yes_30d": i + 2, "stocks_60d": 0}
+        for i in range(MAX_ACTIVE_THEMES)
+    ]
+    # 초과 없음 → []
+    assert select_overflow_evictions(base, now=now) == []
+    # 초과 1 + 임시 테마가 관찰 중(3일) → None (보류)
+    fresh = {"name": "NEW", "created_at": now - timedelta(days=3), "yes_30d": 0, "stocks_60d": 0}
+    assert select_overflow_evictions(base + [fresh], now=now) is None
+    # 관찰 기간 경과 + 신규가 꼴찌 → 신규 비활성화
+    aged = dict(fresh, created_at=now - timedelta(days=PROBATION_DAYS))
+    ev = select_overflow_evictions(base + [aged], now=now)
+    assert [v["name"] for v in ev] == ["NEW"] and ev[0]["score"] == 0
+    # 신규가 증명(생산성 10)하면 기존 꼴찌 T0(score 2)가 나간다
+    proven = dict(aged, yes_30d=10)
+    ev = select_overflow_evictions(base + [proven], now=now)
+    assert [v["name"] for v in ev] == ["T0"]
+
+
+def test_format_auto_register_report_probation():
+    report = format_auto_register_report(
+        registered=[{"name": "신규", "keywords": ["a1", "b1"], "dropped": []}],
+        replaced=[], deferred=[], manual=[], skipped_dup=[],
+        active_count=MAX_ACTIVE_THEMES + 1, probation=["신규"],
+    )
+    assert "🧪" in report and "임시 초과 등록 1건" in report
+    assert f"{MAX_ACTIVE_THEMES + 1}/{MAX_ACTIVE_THEMES}" in report
+    assert f"{PROBATION_DAYS}일 관찰 후" in report
 
 
 # ── 텔레그램 리포트 블록 ───────────────────────────────────────────

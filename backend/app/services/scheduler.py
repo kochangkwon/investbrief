@@ -315,6 +315,17 @@ async def _weekly_theme_discovery():
     except Exception:
         logger.exception("저수율 테마 정리 실패")
 
+    # 3) 임시 초과석 해소 — 전 테마 14일 관찰 후 생산성 꼴찌를 빼 상한(15)으로 복귀
+    try:
+        overflow = await theme_discovery_service.resolve_overflow_themes()
+        if overflow:
+            await telegram_service.send_text(
+                f"🧪 임시 초과 해소: {', '.join(overflow)} 비활성화 "
+                f"(생산성 꼴찌 · 되돌리기: /theme-on \"테마명\")"
+            )
+    except Exception:
+        logger.exception("임시 초과 해소 실패")
+
     if cleaned:
         await telegram_service.send_text(
             f"🧹 테마 {len(cleaned)}건 비활성화: "
@@ -322,7 +333,7 @@ async def _weekly_theme_discovery():
         )
         logger.info("테마 %d건 비활성화: %s", len(cleaned), cleaned)
 
-    # 3) 발굴 + 신규 테마 자동 등록 (리포트 내부에서 상한 적용)
+    # 4) 발굴 + 신규 테마 자동 등록 (리포트 내부에서 상한·교체·임시초과 적용)
     logger.info("주간 테마 발굴 시작")
     try:
         await theme_discovery_service.send_weekly_theme_report()
