@@ -71,14 +71,32 @@ async def _alert_global_market_failure(global_market: dict | None) -> None:
 
 
 async def _alert_flow_fallback(flow: dict | None) -> None:
-    """수급 폴백/전체실패 시 운영 경보 (§7.2). 성공(krx)은 침묵."""
+    """수급 폴백/전체실패 시 운영 경보 (§7.2). 성공(krx)은 침묵.
+
+    + KRX 비밀번호 만료 임박(80일↑) 선제 알림 — 성공 중이어도 보낸다.
+    """
+    try:
+        from app.collectors.investor_flow_collector import krx_password_expiry_notice
+        notice = krx_password_expiry_notice()
+        if notice:
+            await telegram_service.send_text(notice)
+    except Exception:
+        logger.warning("KRX 비밀번호 만료 알림 실패", exc_info=True)
+
     source = (flow or {}).get("source")
     if not flow or source is None:
-        await telegram_service.send_text("🛑 수급 전 소스 실패 — 브리프는 수급 없이 발송됨")
+        from app.collectors.investor_flow_collector import krx_reason_text, load_last_krx_error
+        err = load_last_krx_error() or {}
+        await telegram_service.send_text(
+            "🛑 수급 전 소스 실패 — 브리프는 수급 없이 발송됨\n"
+            f"원인: {krx_reason_text(err.get('reason'))}\n진단: /flow"
+        )
     elif source != "krx":
         label = {"naver": "네이버", "cache": "전일 캐시"}.get(source, source)
+        reason = flow.get("krx_reason") or "KRX 조회 실패"
         await telegram_service.send_text(
-            f"⚠️ 수급 폴백 {label} — KRX 조회 실패 (기준일 {flow.get('trade_date', '?')})"
+            f"⚠️ 수급 폴백 {label} (기준일 {flow.get('trade_date', '?')})\n"
+            f"원인: {reason}\n진단: /flow"
         )
 
 

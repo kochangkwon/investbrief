@@ -44,6 +44,13 @@ async def lifespan(app: FastAPI):
         "KRX 자격증명: %s",
         "설정됨" if settings.krx_id and settings.krx_pw else "누락",
     )
+    # 비밀번호 수명 추적 — data.krx.co.kr 는 90일마다 변경 강제(CD010). 2026-10-01 만료로
+    # 수급이 5거래일 네이버 폴백에 빠졌던 재발 방지: 80일째부터 브리프 후 알림.
+    try:
+        from app.collectors.investor_flow_collector import record_krx_password_fingerprint
+        record_krx_password_fingerprint(settings.krx_pw)
+    except Exception:
+        logger.warning("KRX 비밀번호 지문 기록 실패", exc_info=True)
 
     await init_db()
     logger.info("DB 초기화 완료")

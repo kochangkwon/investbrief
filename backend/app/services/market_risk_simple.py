@@ -120,16 +120,23 @@ async def get_investor_flow_history(days: int = 5) -> list[dict[str, Any]]:
     """
     try:
         from app.collectors import investor_flow_collector
+        # 과거일은 브리프에 저장된 KRX 실측을 먼저 쓴다 — KRX가 죽은 날 날짜마다
+        # 워커(최대 60s×2)를 돌려 브리프를 수십 분 지연시키던 문제 + 서버 재시작 후
+        # 매일 10회 재조회 낭비 제거. 저장값이 없는 날만 KRX를 호출한다.
+        stored = await _stored_krx_flows()
         results = []
         end_date = investor_flow_collector.latest_trading_date()
         check_date = end_date
         for _ in range(days * 2):  # 휴장일 흡수
             if len(results) >= days:
                 break
-            flow = await investor_flow_collector.get_market_flow(check_date)
+            key = check_date.isoformat()
+            flow = stored.get(key)
+            if flow is None:
+                flow = await investor_flow_collector.get_market_flow(check_date)
             if flow:
                 results.append({
-                    "date": check_date.isoformat(),
+                    "date": key,
                     "foreign_net_billion": flow.get("foreign_net_billion", 0),
                 })
             check_date -= timedelta(days=1)
@@ -139,3 +146,40 @@ async def get_investor_flow_history(days: int = 5) -> list[dict[str, Any]]:
     except Exception:
         logger.exception("외인 5일 흐름 조회 실패")
         return []
+
+
+def pick_stored_krx_flows(rows: list[Any]) -> dict[str, dict[str, Any]]:
+    """daily_briefs.investor_flow 목록 → {trade_date: flow} (KRX 실측만, 순수 함수).
+
+    네이버/캐시 폴백값은 날짜가 어긋나거나 반복될 수 있어 히스토리에 쓰지 않는다.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        flow = raw.get("market_flow") if isinstance(raw.get("market_flow"), dict) else raw
+        if flow.get("source") != "krx" or not flow.get("trade_date"):
+            continue
+        if flow.get("foreign_net_billion") is None:
+            continue
+        out.setdefault(str(flow["trade_date"]), flow)
+    return out
+
+
+async def _stored_krx_flows(lookback_days: int = 21) -> dict[str, dict[str, Any]]:
+    try:
+        from sqlalchemy import select
+        from app.database import async_session
+        from app.models.brief import DailyBrief
+        from app.utils.timezone import today_kst
+        cutoff = today_kst() - timedelta(days=lookback_days)
+        async with async_session() as session:
+            rows = (
+                await session.execute(
+                    select(DailyBrief.investor_flow).where(DailyBrief.date >= cutoff)
+                )
+            ).scalars().all()
+        return pick_stored_krx_flows(list(rows))
+    except Exception:
+        logger.warning("저장된 수급 조회 실패 — KRX 직접 조회로 진행", exc_info=True)
+        return {}

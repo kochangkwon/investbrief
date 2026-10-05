@@ -28,6 +28,7 @@ HELP_TEXT = """<b>📋 InvestBrief 명령어</b>
 /news 키워드 — 종목/키워드 뉴스 검색
 /dart 종목명 — 종목 공시 검색
 /report — 관심종목 일일 리포트
+/flow [YYYYMMDD] — 수급 소스 진단 (KRX/네이버/캐시)
 
 <b>🎯 테마 선행 스캐너</b>
 /theme-add "테마명" 키워드1,키워드2 — 테마 추가
@@ -254,6 +255,22 @@ async def _handle_theme_toggle(args: str, enabled: bool) -> str:
     return ("✅ " if success else "❌ ") + message + note
 
 
+async def _handle_flow(args: str) -> str:
+    """/flow [YYYYMMDD] — 수급 소스(KRX/네이버/캐시) 즉시 진단. 기본: 직전 거래일."""
+    from app.collectors import investor_flow_collector
+    from datetime import date as _date
+    arg = args.strip()
+    if arg:
+        try:
+            target = _date(int(arg[0:4]), int(arg[4:6]), int(arg[6:8]))
+        except (ValueError, IndexError):
+            return "사용법: /flow [YYYYMMDD]  예: /flow 20261005"
+    else:
+        target = investor_flow_collector.latest_trading_date(today_kst())
+    await telegram_service.send_text(f"🔎 수급 진단 중… (KRX 최대 2분)")
+    return await investor_flow_collector.diagnose_flow_sources(target)
+
+
 async def _handle_theme_list() -> str:
     """/theme-list — 등록된 테마 목록"""
     async with async_session() as session:
@@ -377,6 +394,7 @@ COMMAND_HANDLERS = {
     "/theme-off": lambda args: _handle_theme_toggle(args, False),
     "/theme-on": lambda args: _handle_theme_toggle(args, True),
     "/theme-list": lambda args: _handle_theme_list(),
+    "/flow": _handle_flow,
     "/theme-scan": lambda args: _handle_theme_scan(),
     "/theme-discover": _handle_theme_discover,
     "/theme-trending": lambda args: _handle_theme_trending(),
