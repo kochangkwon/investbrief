@@ -32,3 +32,6 @@ backend/data/dart_corpcode.json
 
 # bkit 도구 세션 상태파일 (커밋 노이즈)
 docs/.bkit-memory.json
+
+# 문서 폴더 (커밋 제외 — 로컬 전용)
+docs/
