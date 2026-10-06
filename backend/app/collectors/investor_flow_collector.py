@@ -352,6 +352,9 @@ def _parse_naver_signed(raw: Optional[str]) -> float:
     return float(raw.replace(",", "").replace("+", ""))
 
 
+_last_naver_note: Optional[str] = None  # 마지막 거부/실패 사유 (/flow 진단 표시용)
+
+
 def naver_trend_to_flow(
     payloads: dict[str, dict[str, Any]], target_date: date
 ) -> Optional[dict[str, Any]]:
@@ -372,16 +375,21 @@ def naver_trend_to_flow(
         if data.get("bizdate"):
             bizdates.add(str(data["bizdate"]))
 
+    global _last_naver_note
     expected = target_date.strftime("%Y%m%d")
     if bizdates != {expected}:
-        logger.warning(
-            "네이버 수급 bizdate %s ≠ 기준일 %s — 폴백 거부 (개장 전 당일 레코드/날짜 불일치)",
-            sorted(bizdates) or "없음", expected,
+        got = ",".join(sorted(bizdates)) or "없음"
+        _last_naver_note = (
+            f"bizdate {got} ≠ 기준일 {expected}"
+            + (" (네이버는 최신 거래일 1건만 제공 — 당일 레코드가 이미 생성됨)" if got > expected else "")
         )
+        logger.warning("네이버 수급 폴백 거부: %s", _last_naver_note)
         return None
     if foreign == 0 and inst == 0 and retail == 0:
-        logger.warning("네이버 수급 전부 0 (%s) — 미집계로 보고 폴백 거부", expected)
+        _last_naver_note = f"bizdate {expected} 일치하나 외인·기관·개인 전부 0 (미집계)"
+        logger.warning("네이버 수급 폴백 거부: %s", _last_naver_note)
         return None
+    _last_naver_note = None
     return {
         "foreign_net_billion": round(foreign, 0),
         "institution_net_billion": round(inst, 0),
@@ -400,7 +408,9 @@ async def _fetch_naver_market_flow(target_date: date) -> Optional[dict[str, Any]
                 resp.raise_for_status()
                 payloads[code] = resp.json()
         return naver_trend_to_flow(payloads, target_date)
-    except Exception:
+    except Exception as e:
+        global _last_naver_note
+        _last_naver_note = f"호출 실패 {type(e).__name__}: {str(e)[:80]}"
         logger.warning("네이버 시장 수급 폴백 실패 (%s)", target_date, exc_info=True)
         return None
 
@@ -512,7 +522,7 @@ async def diagnose_flow_sources(target_date: date) -> str:
             f"기관 {naver['institution_net_billion']:+,.0f} · 개인 {naver['retail_net_billion']:+,.0f}억"
         )
     else:
-        lines.append("2) 네이버 ❌ — 거부/실패 (bizdate 불일치·전부 0·오류)")
+        lines.append(f"2) 네이버 ❌ — {html.escape(_last_naver_note or '사유 미기록')}")
     cached = _load_fresh_cache()
     if cached and cached.get("market_flow"):
         lines.append(f"3) 캐시 ✅ — 기준일 {cached['market_flow'].get('trade_date')}")
