@@ -84,11 +84,22 @@ def market_flow_from_frames(kospi_df, kosdaq_df, target_date: date) -> Optional[
         if vals:
             any_data = True
         out[key] = round(sum(vals), 0) if vals else 0.0
-    if not any_data:
-        logger.warning("KRX 투자자별 매매 데이터 없음 (%s) — 휴장일/미집계", target_date)
+    if not any_data or all(out[k] == 0 for k in rows):
+        # KRX는 휴장일(예: 2026-10-05 개천절 대체공휴일)에도 행은 주되 값이 전부 0이다.
+        logger.warning("KRX 투자자별 매매 데이터 없음/전부 0 (%s) — 휴장일·미집계", target_date)
         return None
     out["trade_date"] = target_date.isoformat()
     return out
+
+
+def prev_business_day(d: date) -> date:
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+_HOLIDAY_STEPBACK_MAX = 3  # 연휴(최대 3영업일) 흡수
 
 
 def _fetch_top_foreign_traders_sync(
@@ -454,13 +465,23 @@ async def get_market_flow_resilient(target_date: date) -> Optional[dict[str, Any
     주의: 네이버 폴백은 '최신 거래일'만 반환하므로 이 함수는 브리프의 최신일 수급 전용이다.
     과거 특정일 조회(히스토리 루프)는 폴백이 오늘값을 과거일로 오염시키므로 get_market_flow(KRX 전용)를 쓸 것.
     """
-    # 1단 KRX
-    worker, reason = await _run_krx_worker(target_date)
-    if worker and worker.get("market_flow"):
-        mf = {**worker["market_flow"], "source": "krx"}
-        result = {"market_flow": mf, "top_traders": worker.get("top_traders", [])}
-        _save_cache(result)
-        return result
+    # 1단 KRX — 기준일이 휴장일(데이터 없음)이면 직전 영업일로 최대 3회 물러난다.
+    # (10-05 대체공휴일처럼 주말 회피만으로는 못 거르는 날 → 10-02 실측을 쓴다)
+    check = target_date
+    reason: Optional[str] = None
+    for _ in range(_HOLIDAY_STEPBACK_MAX + 1):
+        worker, reason = await _run_krx_worker(check)
+        if worker and worker.get("market_flow"):
+            mf = {**worker["market_flow"], "source": "krx"}
+            if check != target_date:
+                mf["holiday_skipped"] = target_date.isoformat()
+                logger.info("KRX 수급: %s 휴장 → 직전 영업일 %s 사용", target_date, check)
+            result = {"market_flow": mf, "top_traders": worker.get("top_traders", [])}
+            _save_cache(result)
+            return result
+        if reason != "no_data":
+            break  # 로그인/타임아웃/오류는 날짜를 바꿔도 같다
+        check = prev_business_day(check)
     if reason in ("credentials", "password_expired"):
         logger.error("KRX 자격증명 문제(%s) — 네이버 폴백으로 전환", reason)
     krx_reason = krx_reason_text(reason)
@@ -500,12 +521,19 @@ async def diagnose_flow_sources(target_date: date) -> str:
         f"pykrx {pykrx_ver} · KRX 자격증명 {cred}{age_txt}",
     ]
     t0 = time.monotonic()
-    worker, reason = await _run_krx_worker_uncached(target_date)
+    check = target_date
+    worker = reason = None
+    for _ in range(_HOLIDAY_STEPBACK_MAX + 1):
+        worker, reason = await _run_krx_worker_uncached(check)
+        if (worker and worker.get("market_flow")) or reason != "no_data":
+            break
+        lines.append(f"1) KRX ⚠️ {check.isoformat()} 데이터 없음(휴장일 추정) → 직전 영업일 재시도")
+        check = prev_business_day(check)
     took = round(time.monotonic() - t0, 1)
     if worker and worker.get("market_flow"):
         mf = worker["market_flow"]
         lines.append(
-            f"1) KRX ✅ {took}s — 외인 {mf['foreign_net_billion']:+,.0f} · "
+            f"1) KRX ✅ {took}s — {check.isoformat()} 외인 {mf['foreign_net_billion']:+,.0f} · "
             f"기관 {mf['institution_net_billion']:+,.0f} · 개인 {mf['retail_net_billion']:+,.0f}억 · "
             f"TOP {len(worker.get('top_traders') or [])}종목"
         )

@@ -36,6 +36,16 @@ def test_market_flow_from_frames_sums_markets():
     }
 
 
+def test_market_flow_from_frames_all_zero_is_holiday():
+    # 2026-10-05 개천절 대체공휴일: KRX는 행을 주되 값이 전부 0
+    assert ifc.market_flow_from_frames(_frame(0, 0, 0), _frame(0, 0, 0), date(2026, 10, 5)) is None
+
+
+def test_prev_business_day_skips_weekend():
+    assert ifc.prev_business_day(date(2026, 10, 5)) == date(2026, 10, 2)   # 월 → 금
+    assert ifc.prev_business_day(date(2026, 10, 7)) == date(2026, 10, 6)
+
+
 def test_market_flow_from_frames_partial_market():
     out = ifc.market_flow_from_frames(_frame(-100, 20, 80), pd.DataFrame(), date(2026, 10, 5))
     assert out["foreign_net_billion"] == -100.0
