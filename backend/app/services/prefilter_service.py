@@ -277,7 +277,13 @@ def _check_risk_flags_filter(
     levels = {name: (g or {}).get("level") for name, g in flags.items()}
     metrics: dict[str, Any] = {"risk_levels": levels}
 
-    danger = [name for name, lv in levels.items() if lv == "위험"]
+    # 2026-10-28 실측(8/15~10/10, 10거래일 후 수익률): 사전필터 통과 148건 −4.1%(승률 32%) vs
+    #   F5 B그룹(이익-현금 괴리·CAPEX) 단독 거부 57건 +1.4%(승률 51%) — B는 성장·투자기 기업을 걸러내 후보의 더 나은 절반을
+    #   버리고 있었다. D(희석) 거부 −5.6%, B+D −5.0%는 필터가 맞음. → 제외는 C(차입)·D(희석) "위험"만, A/B는 메트릭만 첨부.
+    danger = [name for name, lv in levels.items() if lv == "위험" and (name.startswith("C_") or name.startswith("D_"))]
+    noted = [name for name, lv in levels.items() if lv == "위험" and not (name.startswith("C_") or name.startswith("D_"))]
+    if noted:
+        metrics["risk_noted"] = noted
     if danger:
         return False, [f"F5: 재무리스크 위험 ({', '.join(danger)})"], metrics
     return True, [], metrics
